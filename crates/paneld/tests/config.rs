@@ -23,7 +23,7 @@ fn err(text: &str) -> String {
 fn example_config_is_valid() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/example.toml");
     let cfg = Config::load(&path).unwrap();
-    assert_eq!((cfg.canvas.width, cfg.canvas.height), (128, 32));
+    assert_eq!((cfg.canvas.width, cfg.canvas.height), (172, 172));
     assert!(cfg.preview().is_some());
     assert!(cfg.scene("home").is_some());
 }

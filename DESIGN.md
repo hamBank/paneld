@@ -23,7 +23,7 @@ Working name: `paneld` (rename freely).
 - Video playback is a **later milestone** (one zone only, see §9). Design must not preclude it, but don't build it early.
 
 ### Current hardware
-- 1× Colorlight 5A-75B, **2 HUB75 panels** (resolution TBD, assume 64×32 each until confirmed; everything must come from config).
+- 1× Colorlight 5A-75B, **2 HUB75 panels, each 172×86 at 1/43 scan, stacked vertically** → a 172×172 logical canvas. Everything must still come from config.
 - Expect growth to more panels and possibly more than one card.
 
 ---
@@ -113,11 +113,11 @@ Record the confirmed layouts in `crates/colorlight-proto/PROTOCOL.md` with links
 ### 4.3 Transport (`colorlight-net`)
 - Linux `AF_PACKET` raw socket bound to a configured interface (e.g. `eth1`). Use `socket2` or `pnet_datalink`; prefer minimal deps.
 - Requires `CAP_NET_RAW`. Run via systemd `AmbientCapabilities=CAP_NET_RAW`. No full root.
-- Batch sends per frame. Measure: a full frame for 2× 64×32 is tiny, but 4+ panels at 60 fps should still be well inside Gigabit. Keep a per-frame send-time metric.
+- Batch sends per frame. Measure: a full frame for 2× 172×86 (172×172, ~89 KB of BGR) is small, but 4+ panels at 60 fps should still be well inside Gigabit. Keep a per-frame send-time metric.
 - Gate behind `cfg(target_os = "linux")`. On macOS/Windows the crate compiles to a stub that errors at runtime, so devs can still build the daemon and use the preview sink.
 
 ### 4.4 Multiple panels / cards
-- The engine renders one **logical canvas** (e.g. 128×32 for two 64×32 panels side by side).
+- The engine renders one **logical canvas** (e.g. 172×172 for the two stacked 172×86 panels).
 - An **output map** in config maps canvas regions to card coordinates: `card`, `canvas_rect`, `card_offset`. With one card this is a single region.
 - Multiple cards: either daisy-chained (single NIC, each card's region set in LEDVision) or one NIC per card. Support both by letting each `ColorlightSink` own an interface plus a list of regions. Confirm daisy-chain addressing against the protocol references before implementing.
 - Also support rotation/flip per region (panels mounted upside down happen).
@@ -223,8 +223,8 @@ Watch the config file (`notify` crate). On change: parse + validate fully → sw
 
 ```toml
 [canvas]
-width = 128
-height = 32
+width = 172          # two 172x86 panels stacked
+height = 172
 fps = 30
 
 [[output]]
@@ -232,8 +232,8 @@ type = "colorlight"
 interface = "eth1"
 gamma = 2.2
 brightness = 180
-  [[output.region]]          # one card, two panels side by side
-  canvas = { x = 0, y = 0, w = 128, h = 32 }
+  [[output.region]]          # one card, two panels stacked
+  canvas = { x = 0, y = 0, w = 172, h = 172 }
   card_offset = { x = 0, y = 0 }
   rotate = 0
 
@@ -272,10 +272,10 @@ extract = { "weather:temp" = "$.current.temp", "weather:icon" = "$.current.icon"
 name = "home"
 duration_s = 20
   [[scene.zone]]
-  rect = { x = 0, y = 0, w = 64, h = 32 }
+  rect = { x = 0, y = 0, w = 172, h = 86 }      # top panel
   widget = { type = "clock", format = "%H:%M", font = "6x10" }
   [[scene.zone]]
-  rect = { x = 64, y = 0, w = 64, h = 32 }
+  rect = { x = 0, y = 86, w = 172, h = 86 }     # bottom panel
   widget = { type = "value", key = "ha:sensor.outside_temperature", format = "{:.1}°", icon = "thermometer" }
 
 [[scene]]
@@ -283,7 +283,7 @@ name = "power"
 duration_s = 15
 condition = "prom:house_power > 0"
   [[scene.zone]]
-  rect = { x = 0, y = 0, w = 128, h = 32 }
+  rect = { x = 0, y = 0, w = 172, h = 172 }
   widget = { type = "sparkline", key = "prom:house_power_series", color = "#ffaa00" }
 
 [quiet_hours]
@@ -360,7 +360,8 @@ Each milestone ends with: tests green, `cargo clippy -- -D warnings` clean, READ
 ---
 
 ## 15. Open questions
-- Exact panel resolution and scan rate (needed for M1, and LEDVision settings).
+- ~~Exact panel resolution and scan rate~~ **Answered:** 172×86, 1/43 scan (86 rows / 2 = 43 scan lines, the usual two-halves HUB75 layout). Needed for the LEDVision settings in `deploy/README.md`.
 - Card firmware version currently installed.
-- Whether panels are side-by-side (128×32) or stacked (64×64).
+- ~~Side-by-side or stacked~~ **Answered:** stacked vertically, canvas 172×172.
+- Which HUB75 port(s) each panel is on and how the card maps them (sets `card_offset` in the M1 output map). Confirm in LEDVision.
 - Which HA entities and external APIs to show first (drives M3 priorities).

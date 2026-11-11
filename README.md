@@ -10,6 +10,10 @@ Architecture, config schema and roadmap are in [`DESIGN.md`](DESIGN.md).
 
 Not built yet: Colorlight output (M1), scene rotation and more widgets (M2), data sources (M3), control API and MQTT (M4). See `DESIGN.md` §14.
 
+## Hardware
+
+One Colorlight 5A-75B driving two 172×86 HUB75 panels (1/43 scan), stacked vertically into a 172×172 canvas. The card's firmware version is still to be confirmed (`DESIGN.md` §15).
+
 ## Quick start
 
 ```bash

@@ -2,13 +2,13 @@
 # only what the current milestone (M0) implements is accepted here.
 
 [canvas]
-width = 128        # two 64x32 panels side by side
-height = 32
+width = 172        # two 172x86 panels (1/43 scan) stacked vertically
+height = 172
 fps = 30           # 1..=60
 
 [[output]]
 type = "preview"   # served at http://<http.bind>/preview
-scale = 8
+scale = 4
 grid = true
 
 [http]
@@ -16,19 +16,24 @@ bind = "127.0.0.1:8080"
 
 [[scene]]
 name = "home"
+  # Top panel: y 0..86
   [[scene.zone]]
-  rect = { x = 0, y = 0, w = 64, h = 32 }
-  widget = { type = "clock", format = "%H:%M", font = "10x20", color = "#ffaa00" }
+  rect = { x = 0, y = 0, w = 172, h = 60 }
+  widget = { type = "clock", format = "%H:%M:%S", font = "10x20", color = "#ffaa00" }
   [[scene.zone]]
-  rect = { x = 64, y = 0, w = 64, h = 16 }
-  widget = { type = "clock", format = "%a %d %b", font = "6x10", color = "#80c0ff" }
+  rect = { x = 0, y = 60, w = 172, h = 26 }
+  widget = { type = "clock", format = "%A %d %B", font = "6x10", color = "#80c0ff" }
+  # Bottom panel: y 86..172
   [[scene.zone]]
-  rect = { x = 64, y = 16, w = 64, h = 16 }
+  rect = { x = 0, y = 86, w = 172, h = 43 }
   background = "#101030"
-  widget = { type = "text", text = "Hello from paneld", font = "6x10", scroll_px_per_s = 20 }
+  widget = { type = "text", text = "Hello from paneld", font = "9x15", scroll_px_per_s = 30 }
+  [[scene.zone]]
+  rect = { x = 0, y = 129, w = 172, h = 43 }
+  widget = { type = "text", text = "21.5°C", font = "10x20", color = "#00ff80" }
 
 [[scene]]
 name = "banner"
   [[scene.zone]]
-  rect = { x = 0, y = 0, w = 128, h = 32 }
+  rect = { x = 0, y = 0, w = 172, h = 172 }
   widget = { type = "text", text = "paneld", font = "10x20", color = "#00ff80" }
