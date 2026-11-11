@@ -1,0 +1,34 @@
+# paneld example config. See DESIGN.md §8 for the full planned schema;
+# only what the current milestone (M0) implements is accepted here.
+
+[canvas]
+width = 128        # two 64x32 panels side by side
+height = 32
+fps = 30           # 1..=60
+
+[[output]]
+type = "preview"   # served at http://<http.bind>/preview
+scale = 8
+grid = true
+
+[http]
+bind = "127.0.0.1:8080"
+
+[[scene]]
+name = "home"
+  [[scene.zone]]
+  rect = { x = 0, y = 0, w = 64, h = 32 }
+  widget = { type = "clock", format = "%H:%M", font = "10x20", color = "#ffaa00" }
+  [[scene.zone]]
+  rect = { x = 64, y = 0, w = 64, h = 16 }
+  widget = { type = "clock", format = "%a %d %b", font = "6x10", color = "#80c0ff" }
+  [[scene.zone]]
+  rect = { x = 64, y = 16, w = 64, h = 16 }
+  background = "#101030"
+  widget = { type = "text", text = "Hello from paneld", font = "6x10", scroll_px_per_s = 20 }
+
+[[scene]]
+name = "banner"
+  [[scene.zone]]
+  rect = { x = 0, y = 0, w = 128, h = 32 }
+  widget = { type = "text", text = "paneld", font = "10x20", color = "#00ff80" }
