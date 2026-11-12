@@ -7,6 +7,7 @@
 
 pub mod canvas;
 pub mod color;
+pub mod colorlight_sink;
 pub mod config;
 pub mod engine;
 pub mod fonts;

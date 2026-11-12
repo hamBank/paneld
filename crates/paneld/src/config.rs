@@ -75,6 +75,11 @@ pub struct ColorlightOutput {
     pub white_point: Color,
     #[serde(default)]
     pub brightness_mode: BrightnessMode,
+    /// Order of the three colour bytes on the wire. The protocol does not fix
+    /// it; it depends on the panel (PROTOCOL.md, "Pixel byte order"). Find
+    /// the right value with `paneld test-pattern --pattern bars`.
+    #[serde(default)]
+    pub color_order: ColorOrder,
     /// Card firmware major version, for when discovery fails (DESIGN.md §4.2).
     #[serde(default)]
     pub firmware_major: Option<u8>,
@@ -91,6 +96,71 @@ impl ColorlightOutput {
             BrightnessMode::Hardware => self.brightness,
             BrightnessMode::Software => 255,
         }
+    }
+}
+
+/// Order of the colour bytes sent to the card, named by what each wire byte
+/// carries: `Bgr` sends blue first, then green, then red.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ColorOrder {
+    #[default]
+    Rgb,
+    Rbg,
+    Grb,
+    Gbr,
+    Brg,
+    Bgr,
+}
+
+impl ColorOrder {
+    pub const ALL: [ColorOrder; 6] = [
+        ColorOrder::Rgb,
+        ColorOrder::Rbg,
+        ColorOrder::Grb,
+        ColorOrder::Gbr,
+        ColorOrder::Brg,
+        ColorOrder::Bgr,
+    ];
+
+    /// For wire byte `i`, the index (0 = R, 1 = G, 2 = B) of the canvas
+    /// channel to send there.
+    pub const fn source_channels(self) -> [usize; 3] {
+        match self {
+            ColorOrder::Rgb => [0, 1, 2],
+            ColorOrder::Rbg => [0, 2, 1],
+            ColorOrder::Grb => [1, 0, 2],
+            ColorOrder::Gbr => [1, 2, 0],
+            ColorOrder::Brg => [2, 0, 1],
+            ColorOrder::Bgr => [2, 1, 0],
+        }
+    }
+
+    /// Reorder packed `RGBRGB…` bytes in place. A trailing partial pixel is
+    /// left alone.
+    pub fn reorder_in_place(self, rgb: &mut [u8]) {
+        if self == ColorOrder::Rgb {
+            return;
+        }
+        let [a, b, c] = self.source_channels();
+        for px in rgb.chunks_exact_mut(3) {
+            let (r, g, bl) = (px[0], px[1], px[2]);
+            let src = [r, g, bl];
+            px[0] = src[a];
+            px[1] = src[b];
+            px[2] = src[c];
+        }
+    }
+}
+
+impl std::str::FromStr for ColorOrder {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        ColorOrder::ALL
+            .into_iter()
+            .find(|o| format!("{o:?}").eq_ignore_ascii_case(s))
+            .ok_or_else(|| format!("unknown colour order {s:?} (rgb, rbg, grb, gbr, brg, bgr)"))
     }
 }
 

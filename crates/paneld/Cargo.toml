@@ -9,6 +9,8 @@ description = "Scene compositor that drives HUB75 LED panels via Colorlight card
 [dependencies]
 anyhow = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+colorlight-net = { path = "../colorlight-net" }
+colorlight-proto = { path = "../colorlight-proto" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4", features = ["derive"] }
 embedded-graphics = "0.8"
