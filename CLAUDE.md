@@ -6,6 +6,7 @@ This repo is `paneld`: a Rust daemon that composes data from Home Assistant, HTT
 
 ## Working order
 - Follow the milestones in `DESIGN.md` §14 in order. Don't start a later milestone's features early.
+- Each milestone is its own branch and PR. While the previous milestone's PR is open, branch from it and target the PR at its branch, so the diff shows one milestone. Retarget to `main` once the previous PR merges.
 - Check §15 (open questions) and ask rather than guess when a question there blocks the work.
 
 ## Hard rules
