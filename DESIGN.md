@@ -76,7 +76,7 @@ paneld/
 │   └── paneld/               # the daemon: sources, store, engine, widgets, sinks, control
 ├── config/
 │   └── example.toml
-├── assets/fonts/             # bitmap fonts (BDF/PCF or embedded-graphics fonts)
+├── assets/fonts/             # shipped BDF fonts + licences
 ├── deploy/
 │   ├── paneld.service        # systemd unit
 │   └── README.md             # Pi setup notes
@@ -170,7 +170,14 @@ Applied per sink (so the preview can show "true" colours while the panel gets co
 - `image` widget (M2): `path` (file, relative to the config file) or `key` (a `Value::Image` in the store), `fit` (`contain` default, `cover`, `stretch`, `none`), `align`, `smooth`, `loop`. Scaling is nearest-neighbour unless `smooth` (box filter on axes that shrink), results are cached per (image, zone size), and alpha is blended over the zone background. GIF frames are composited in full (disposal methods and transparency honoured) and picked from `FrameCtx::scene_elapsed`; delays under 20 ms count as 100 ms, like browsers. File decoding happens at config load time (`Config::load_media`), never on the render thread. A future video widget fits the same shape: decode off-thread into frames the widget selects by `scene_elapsed`. `Widget` gained an optional `prepare(zone_w, zone_h)` hook so scaling can be done before the first frame; the widget also copes if it is never called.
 - Initial widgets: `clock`, `text` (static/scrolling, templated from store keys), `value` (number + unit + icon + threshold colours), `sparkline/graph` (from `Series`), `image` (static or GIF), `progress bar`, `icon`.
 - Templating: a small template syntax for text, e.g. `"{ha:sensor.outside_temp:.1}°"`. Keep it minimal and implement it yourself or with a tiny crate. Don't pull in a full template engine.
-- Fonts: bitmap fonts via `embedded-graphics` mono fonts plus BDF loading (e.g. `bdf-parser` / `eg-bdf`) for nicer pixel fonts.
+- Fonts (M2, as built): the `embedded-graphics` ISO-8859-1 mono fonts plus BDF fonts loaded at runtime, behind one `fonts::Font` (a `FontFace` enum of `Mono(&MonoFont)` / `Bdf(Arc<BdfFont>)` plus an integer scale). Decisions:
+  - *Parser:* hand-written (`bdf.rs`, ~250 lines with tests), not `bdf-parser` or `eg-bdf`. The subset we need is a few keywords; our own parser reports `line N` errors that we can put in config errors, handles `DWIDTH` proportional advances directly, and adds no dependency (and no MSRV or `--locked` surface). `eg-bdf` is built around converting fonts at compile time (build script / macro output as `static` data) for `no_std` targets, which is the opposite of runtime loading from a path named in config, so it was not considered further.
+  - *Abstraction:* our own `Font` with `text_width`, `line_height` and `draw`, rather than `TextRenderer`/`CharacterStyle` impls. The widgets only need "measure this string, draw it at x/centre-y with an alignment", and an integer scale is easiest as a `DrawTarget` adapter (`ScaleTarget`) that turns each font pixel into an N×N block; built-in fonts are drawn through the stock `MonoTextStyle` onto that adapter, so scale 1 is pixel-identical to the old rendering. BDF glyph pixels are emitted straight into it. No per-glyph rasterised cache: glyph bitmaps are already the cache.
+  - *Config:* `[[font]] name = "...", path = "..."` (explicit table) rather than `[fonts] dir`. Names are decoupled from file names, nothing is loaded that is not asked for, and there is no directory-order dependence. Paths resolve against `Config::base_dir` like image paths. `Config::load_fonts` (called from `parse_in`, so `Config::load` stays a pure path-to-Config step) parses the files and resolves each widget's font into `face`; a widget never touches the filesystem.
+  - *Scale:* `font_scale = N` (1–8) on `clock`/`text`/`value`, not a `"6x10@3"` name suffix. It composes with any font name, needs no string parsing, and is validated like any other number.
+  - *Missing glyphs:* drawn as the font's `?` if it has one, else a blank of the font's `FONTBOUNDINGBOX` width.
+  - Layout: the line box (`FONT_ASCENT + FONT_DESCENT` for BDF) times scale is centred on the zone's mid-line; width is the sum of `DWIDTH` advances.
+  - Shipped fonts live in `assets/fonts/` (Spleen 12x24, 16x32, 32x64, BSD-2-Clause) with licences and sources in `assets/fonts/README.md`.
 
 ### 5.5 Scheduler
 - **Playlist**: ordered scenes with durations. Conditional scenes are skipped when their condition is false.

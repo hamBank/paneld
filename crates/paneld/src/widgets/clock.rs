@@ -16,6 +16,8 @@ impl Clock {
             text: Text::new(&TextConfig {
                 text: String::new(),
                 font: cfg.font.clone(),
+                font_scale: cfg.font_scale,
+                face: cfg.face.clone(),
                 color: cfg.color,
                 align: cfg.align,
                 scroll_px_per_s: None,

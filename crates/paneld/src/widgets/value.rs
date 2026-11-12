@@ -1,15 +1,14 @@
 use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, FixedOffset, Utc};
-use embedded_graphics::mono_font::{MonoFont, MonoTextStyle};
 use embedded_graphics::pixelcolor::Rgb888;
 use embedded_graphics::prelude::*;
-use embedded_graphics::text::renderer::TextRenderer;
-use embedded_graphics::text::{Alignment, Baseline, Text as EgText, TextStyleBuilder};
+use embedded_graphics::text::Alignment;
 
 use super::{font, FrameCtx, Widget};
 use crate::canvas::ZoneTarget;
 use crate::config::{Align, ValueConfig};
+use crate::fonts::Font;
 use crate::format::NumberFormat;
 use crate::icons::{self, Icon, ICON_SIZE};
 use crate::store::{StoreSnapshot, Value};
@@ -27,7 +26,7 @@ pub struct ValueWidget {
     key: String,
     format: NumberFormat,
     unit: String,
-    font: &'static MonoFont<'static>,
+    font: Font,
     color: Rgb888,
     align: Align,
     icon: Option<&'static Icon>,
@@ -54,7 +53,7 @@ impl ValueWidget {
                 .or_else(|_| NumberFormat::parse("{}"))
                 .expect("default format parses"),
             unit: cfg.unit.clone().unwrap_or_default(),
-            font: font(&cfg.font),
+            font: font(&cfg.font, &cfg.face, cfg.font_scale),
             color: cfg.color.0,
             align: cfg.align,
             icon: cfg.icon.as_deref().and_then(icons::lookup),
@@ -111,12 +110,7 @@ impl Widget for ValueWidget {
 
     fn draw(&self, target: &mut ZoneTarget<'_>) {
         let (w, h) = (target.width() as i32, target.height() as i32);
-        let style = MonoTextStyle::new(self.font, self.text_color);
-        let text_w = style
-            .measure_string(&self.text, Point::zero(), Baseline::Middle)
-            .bounding_box
-            .size
-            .width as i32;
+        let text_w = self.font.text_width(&self.text) as i32;
         let icon_w = self.icon.map_or(0, |_| ICON_SIZE as i32 + ICON_GAP);
         let group_w = icon_w + text_w;
         // Too wide to fit: keep the left edge, let the zone clip the rest.
@@ -131,17 +125,14 @@ impl Widget for ValueWidget {
             let origin = Point::new(x0, (h - ICON_SIZE as i32) / 2);
             icon.draw(target, origin, self.text_color);
         }
-        let text_style = TextStyleBuilder::new()
-            .alignment(Alignment::Left)
-            .baseline(Baseline::Middle)
-            .build();
-        let _ = EgText::with_text_style(
+        let _ = self.font.draw(
+            target,
             &self.text,
-            Point::new(x0 + icon_w, h / 2),
-            style,
-            text_style,
-        )
-        .draw(target);
+            x0 + icon_w,
+            h / 2,
+            Alignment::Left,
+            self.text_color,
+        );
     }
 }
 
