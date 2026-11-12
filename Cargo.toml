@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/colorlight-proto", "crates/paneld"]
+members = ["crates/colorlight-proto", "crates/colorlight-net", "crates/paneld"]
 
 [workspace.package]
 edition = "2021"
