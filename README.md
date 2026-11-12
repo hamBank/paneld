@@ -58,15 +58,16 @@ See [`config/example.toml`](config/example.toml). Unknown keys are rejected, and
 | `[[output]]` | `type = "colorlight"`, `interface` (required), `gamma` (1.0–4.0, default 2.2), `brightness` (0–255, default 255), `white_point` (`#rrggbb`, default `#ffffff`), `brightness_mode` (`hardware` default, or `software`), `color_order` (`rgb` default, `rbg`, `grb`, `gbr`, `brg`, `bgr`: what the three wire bytes carry; the right value depends on the panel), `firmware_major` (optional override if discovery fails), `sync_gap_us` (0–20000, default 500). One output per interface. The whole canvas goes to card origin (0,0); multi-region maps come in M6. |
 | `[http]` | `bind` (default `127.0.0.1:8080`) |
 | `[playlist]` | `default_duration_s` (> 0, at most 86400, default 10): how long a scene is shown when it has no `duration_s` |
+| `[[font]]` | `name`, `path`: a BDF font file (path relative to the config file) usable as `font = "name"`; see Fonts below. Repeatable. |
 | `[[scene]]` | `name`, `duration_s` (optional, same range), `condition` (optional, see below), `[[scene.zone]]` with `rect = { x, y, w, h }`, `widget`, optional `background = "#rrggbb"` |
 
 Widgets:
-- `clock`: `format` (strftime, default `%H:%M`), `font`, `color`, `align`
-- `text`: `text`, `font`, `color`, `align` (`left`/`center`/`right`), `scroll_px_per_s` (scrolls right to left when set)
+- `clock`: `format` (strftime, default `%H:%M`), `font`, `font_scale`, `color`, `align`
+- `text`: `text`, `font`, `font_scale`, `color`, `align` (`left`/`center`/`right`), `scroll_px_per_s` (scrolls right to left when set)
 - `image`: a PNG or GIF scaled into the zone. Set exactly one of `path` (relative to the config file's directory; read and decoded when the config loads, so a bad file is a config error naming it) or `key` (a store key holding an image, filled by sources from M3). Options: `fit` (`contain` default, `cover`, `stretch`, `none`), `align` (`center` default, `top`, `bottom`, `left`, `right`, `top_left`, `top_right`, `bottom_left`, `bottom_right`), `smooth` (average pixels when shrinking, good for photos; default off, which keeps pixel art sharp), `loop` (GIF: default true, false stops on the last frame). Transparency blends over the zone's `background`. GIF frames follow the scene's elapsed time; frame delays under 20 ms are treated as 100 ms. Images are limited to 4096 px per side and 16 MiB per file.
 
 - `value`: shows a number from the store (`Value::Number`).
-  - `key` (required), `format` (default `{}`), `unit` (default none), `font`, `color` (default white), `align` (`center` default; aligns icon and text together), `icon` (optional), `thresholds`, `stale_after_s` (optional, > 0).
+  - `key` (required), `format` (default `{}`), `unit` (default none), `font`, `font_scale`, `color` (default white), `align` (`center` default; aligns icon and text together), `icon` (optional), `thresholds`, `stale_after_s` (optional, > 0).
   - `format` has exactly one placeholder: `{}` (plain), `{:.N}` (N decimals), `{:>W.N}` / `{:<W.N}` (padded to width W, N optional). `{{` and `}}` are literal braces. Anything else is a config error. Examples: `"{:.1}°"`, `"{:.0} W"`, `"[{:>6.1}]"`.
   - `unit` is appended verbatim after the formatted number (include the space yourself: `unit = " W"`). The unit stored with the value is ignored.
   - `thresholds = [{ above = 25.0, color = "#ff4000" }, …]`: the value takes the colour of the highest `above` it is strictly greater than, else `color`. Any order, `above` values must be unique.
@@ -77,7 +78,14 @@ Widgets:
   - Auto scale uses the shown points' range plus a 10% margin; flat data is drawn in the middle. Values outside a fixed scale are clamped to the edge. Non-finite points are skipped.
   - Fewer points than `points`: the graph grows in from the right edge. A single point is a dot. Missing key, wrong value type or empty series: nothing is drawn.
 
-Fonts: `4x6`, `5x7`, `5x8`, `6x9`, `6x10` (default), `6x12`, `6x13`, `7x13`, `7x14`, `8x13`, `9x15`, `9x18`, `10x20`, plus `_bold` variants of most. All are ISO-8859-1, so `°` works.
+### Fonts
+
+`font` takes a built-in name or the name of a `[[font]]`:
+- Built-in: `4x6`, `5x7`, `5x8`, `6x9`, `6x10` (default), `6x12`, `6x13`, `7x13`, `7x14`, `8x13`, `9x15`, `9x18`, `10x20`, plus `_bold` variants of most. All are ISO-8859-1, so `°` works.
+- BDF fonts: declare each with `[[font]] name = "big", path = "../assets/fonts/spleen-32x64.bdf"` and use `font = "big"`. The file is read and parsed when the config loads (never on the render thread), so a missing or malformed file is a config error naming the file and, for a parse error, the line. Names must be unique and must not be a built-in name; an unknown `font` lists every known name. `assets/fonts/` ships Spleen 12x24, 16x32 and 32x64 (see `assets/fonts/README.md`).
+- `font_scale` (1–8, default 1) on `clock`, `text` and `value` draws every font pixel as an N×N block, for big crisp digits from any font: `font = "10x20", font_scale = 3` is a 30x60 font.
+- BDF support covers the common subset (`FONTBOUNDINGBOX`, `FONT_ASCENT`/`FONT_DESCENT`, `ENCODING`, `DWIDTH`, `BBX`, `BITMAP`), including proportional widths. `ENCODING` is read as a Unicode code point. A character the font lacks is drawn as `?` if the font has one, otherwise it leaves a blank of the font's widest-cell width. Built-in fonts also show `?`.
+- Layout is the same for every font: the line box (`ascent + descent` for BDF, the cell height for built-ins, times `font_scale`) is centred vertically in the zone, and alignment uses the measured text width.
 
 ### Playlist and conditions
 

@@ -9,11 +9,10 @@ mod value;
 use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset};
-use embedded_graphics::mono_font::MonoFont;
 
 use crate::canvas::ZoneTarget;
 use crate::config::WidgetConfig;
-use crate::fonts;
+use crate::fonts::{self, Font, FontFace};
 use crate::store::StoreSnapshot;
 
 pub use clock::Clock;
@@ -56,9 +55,14 @@ pub fn build(cfg: &WidgetConfig) -> Box<dyn Widget> {
     }
 }
 
-fn font(name: &str) -> &'static MonoFont<'static> {
+/// The font a widget draws with: the one `Config::load_fonts` resolved, or
+/// (for a config that skipped loading) the built-in of that name.
+fn font(name: &str, face: &Option<FontFace>, scale: u32) -> Font {
     // Validation rejects unknown fonts; fall back rather than panic anyway.
-    fonts::lookup(name)
-        .or_else(|| fonts::lookup(fonts::DEFAULT_FONT))
-        .expect("default font exists")
+    let face = face
+        .clone()
+        .or_else(|| FontFace::builtin(name))
+        .or_else(|| FontFace::builtin(fonts::DEFAULT_FONT))
+        .expect("default font exists");
+    Font::new(face, scale)
 }

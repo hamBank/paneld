@@ -5,6 +5,7 @@
 //! renderer with the `clock` and `text` widgets, the render loop and the
 //! HTTP preview sink.
 
+pub mod bdf;
 pub mod canvas;
 pub mod color;
 pub mod colorlight_sink;

@@ -520,3 +520,124 @@ fn image_enums_reject_unknown_values() {
         image_err(r#"path = "palette.png", looping = false"#).contains("unknown field `looping`")
     );
 }
+
+// --- fonts -----------------------------------------------------------------
+
+fn fonts_dir() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/fonts")
+}
+
+/// A one-zone config with `widget`, followed by the `[[font]]` tables in `fonts`.
+fn font_cfg(fonts: &str, widget: &str) -> String {
+    format!(
+        "{MINIMAL}\n  [[scene.zone]]\n  rect = {{ x = 0, y = 0, w = 8, h = 8 }}\n  widget = {widget}\n\n{fonts}"
+    )
+}
+
+fn font_err(fonts: &str, widget: &str) -> String {
+    format!(
+        "{:#}",
+        Config::parse_in(&font_cfg(fonts, widget), &fonts_dir()).expect_err("should be rejected")
+    )
+}
+
+#[test]
+fn fonts_load_relative_to_the_config_directory() {
+    let cfg = Config::parse_in(
+        &font_cfg(
+            "[[font]]\nname = \"prop\"\npath = \"prop.bdf\"\n",
+            "{ type = \"text\", text = \"hi\", font = \"prop\", font_scale = 3 }",
+        ),
+        &fonts_dir(),
+    )
+    .unwrap();
+    assert_eq!(cfg.fonts.len(), 1);
+    assert!(cfg.fonts[0].loaded.is_some());
+    let WidgetConfig::Text(t) = &cfg.scenes[0].zones[0].widget else {
+        panic!("not a text widget");
+    };
+    assert_eq!(t.font_scale, 3);
+    assert!(t.face.is_some());
+}
+
+#[test]
+fn font_scale_defaults_to_one_and_builtin_fonts_need_no_font_table() {
+    let cfg = Config::parse(&font_cfg("", "{ type = \"clock\", font = \"9x15\" }")).unwrap();
+    let WidgetConfig::Clock(c) = &cfg.scenes[0].zones[0].widget else {
+        panic!("not a clock");
+    };
+    assert_eq!(c.font_scale, 1);
+    assert!(c.face.is_some());
+}
+
+#[test]
+fn missing_font_file_names_the_file() {
+    let e = font_err(
+        "[[font]]\nname = \"gone\"\npath = \"nope.bdf\"\n",
+        "{ type = \"clock\" }",
+    );
+    assert!(e.contains("font \"gone\": cannot load"), "{e}");
+    assert!(e.contains("nope.bdf"), "{e}");
+}
+
+#[test]
+fn bad_bdf_reports_file_and_line() {
+    let dir = std::env::temp_dir().join(format!("paneld-font-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("bad.bdf"),
+        "STARTFONT 2.1\nFONTBOUNDINGBOX 4 4 0 0\nSTARTCHAR a\nENCODING 97\nDWIDTH 4 0\nBBX 4 1 0 0\nBITMAP\nXY\nENDCHAR\nENDFONT\n",
+    )
+    .unwrap();
+    let text = font_cfg(
+        "[[font]]\nname = \"bad\"\npath = \"bad.bdf\"\n",
+        "{ type = \"clock\" }",
+    );
+    let e = format!("{:#}", Config::parse_in(&text, &dir).unwrap_err());
+    std::fs::remove_dir_all(&dir).ok();
+    assert!(e.contains("bad.bdf"), "{e}");
+    assert!(e.contains("line 8: invalid hex digits"), "{e}");
+}
+
+#[test]
+fn unknown_font_lists_builtin_and_loaded_names() {
+    let e = font_err(
+        "[[font]]\nname = \"prop\"\npath = \"prop.bdf\"\n",
+        "{ type = \"text\", text = \"x\", font = \"nope\" }",
+    );
+    assert!(e.contains("unknown font \"nope\""), "{e}");
+    assert!(e.contains("6x10") && e.contains("10x20, prop"), "{e}");
+}
+
+#[test]
+fn font_table_validation() {
+    let e = font_err(
+        "[[font]]\nname = \"6x10\"\npath = \"prop.bdf\"\n[[font]]\nname = \"a\"\npath = \"prop.bdf\"\n[[font]]\nname = \"a\"\npath = \"prop.bdf\"\n[[font]]\nname = \" \"\npath = \"\"\n",
+        "{ type = \"clock\" }",
+    );
+    assert!(
+        e.contains("\"6x10\": name is already a built-in font"),
+        "{e}"
+    );
+    assert!(e.contains("\"a\": duplicate font name"), "{e}");
+    assert!(e.contains("font[3]: name must not be empty"), "{e}");
+}
+
+#[test]
+fn font_scale_must_be_1_to_8() {
+    for bad in [0, 9] {
+        let e = err(&font_cfg(
+            "",
+            &format!("{{ type = \"value\", key = \"k\", font_scale = {bad} }}"),
+        ));
+        assert!(
+            e.contains(&format!("font_scale must be 1..=8 (got {bad})")),
+            "{e}"
+        );
+    }
+    let ok = Config::parse(&font_cfg(
+        "",
+        "{ type = \"text\", text = \"a\", font_scale = 8 }",
+    ));
+    assert!(ok.is_ok());
+}

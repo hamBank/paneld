@@ -28,6 +28,17 @@ grid = true
 [http]
 bind = "127.0.0.1:8080"
 
+# BDF fonts, usable as `font = "name"` in any text, clock or value widget.
+# `path` is relative to this file and is read when the config loads, so a
+# missing or malformed file is a config error. Built-in names (6x10, 10x20,
+# ...) are always available; `font_scale = N` (1..=8) blows up any font.
+[[font]]
+name = "spleen-32x64"
+path = "../assets/fonts/spleen-32x64.bdf"
+[[font]]
+name = "spleen-16x32"
+path = "../assets/fonts/spleen-16x32.bdf"
+
 # Scenes rotate in the order listed below.
 [playlist]
 default_duration_s = 10   # for scenes without their own duration_s; > 0, max 86400
@@ -37,11 +48,11 @@ name = "home"
 duration_s = 20           # seconds on screen per turn
   # Top panel: y 0..86
   [[scene.zone]]
-  rect = { x = 0, y = 0, w = 172, h = 60 }
-  widget = { type = "clock", format = "%H:%M:%S", font = "10x20", color = "#ffaa00" }
+  rect = { x = 0, y = 0, w = 172, h = 64 }
+  widget = { type = "clock", format = "%H:%M", font = "spleen-32x64", color = "#ffaa00" }
   [[scene.zone]]
-  rect = { x = 0, y = 60, w = 172, h = 26 }
-  widget = { type = "clock", format = "%A %d %B", font = "6x10", color = "#80c0ff" }
+  rect = { x = 0, y = 64, w = 172, h = 22 }
+  widget = { type = "clock", format = "%a %d %b", font = "6x10", font_scale = 2, color = "#80c0ff" }
   # Bottom panel: y 86..172
   [[scene.zone]]
   rect = { x = 0, y = 86, w = 172, h = 43 }
@@ -67,7 +78,7 @@ duration_s = 5
 condition = "prom:house_power > 0"
   [[scene.zone]]
   rect = { x = 0, y = 0, w = 172, h = 172 }
-  widget = { type = "text", text = "paneld", font = "10x20", color = "#00ff80" }
+  widget = { type = "text", text = "paneld", font = "10x20", font_scale = 2, color = "#00ff80" }
 
 # A still image (or animated GIF) scaled into a zone. `path` is relative to
 # this file and is loaded when the config loads; use `key = "media:..."`

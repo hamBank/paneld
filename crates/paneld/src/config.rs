@@ -14,10 +14,11 @@ use anyhow::Context;
 use chrono::format::{Item, StrftimeItems};
 use serde::Deserialize;
 
+use crate::bdf::BdfFont;
 use crate::canvas::Rect;
 use crate::color::Color;
 use crate::condition::Condition;
-use crate::fonts;
+use crate::fonts::{self, FontFace};
 use crate::format::NumberFormat;
 use crate::icons;
 use crate::media::Media;
@@ -41,13 +42,30 @@ pub struct Config {
     pub http: HttpConfig,
     #[serde(default)]
     pub playlist: PlaylistConfig,
+    /// BDF fonts, usable by name from any text, clock or value widget.
+    #[serde(default, rename = "font")]
+    pub fonts: Vec<FontConfig>,
     #[serde(default, rename = "scene")]
     pub scenes: Vec<SceneConfig>,
-    /// Directory relative media paths are resolved against: the config file's
+    /// Directory relative media and font paths are resolved against: the config file's
     /// directory for [`Config::load`], the working directory for
     /// [`Config::parse`].
     #[serde(skip)]
     pub base_dir: PathBuf,
+}
+
+/// A BDF font file made available under a name (`[[font]]`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FontConfig {
+    /// Name widgets use in `font = "..."`. Must not be a built-in font name.
+    pub name: String,
+    /// `.bdf` file, relative to the config file's directory. Read and parsed
+    /// once, while the config is loaded.
+    pub path: PathBuf,
+    /// Parsed font, filled in by [`Config::load_fonts`].
+    #[serde(skip)]
+    pub loaded: Option<Arc<BdfFont>>,
 }
 
 /// Playlist-wide settings (DESIGN.md §5.5).
@@ -333,6 +351,12 @@ pub struct ClockConfig {
     pub format: String,
     #[serde(default = "default_font")]
     pub font: String,
+    /// Integer scale for the font, 1..=8: each font pixel becomes an N×N block.
+    #[serde(default = "default_font_scale")]
+    pub font_scale: u32,
+    /// Resolved font (built-in or loaded), filled in by [`Config::load_fonts`].
+    #[serde(skip)]
+    pub face: Option<FontFace>,
     #[serde(default = "default_color")]
     pub color: Color,
     #[serde(default)]
@@ -349,6 +373,12 @@ pub struct TextConfig {
     pub text: String,
     #[serde(default = "default_font")]
     pub font: String,
+    /// Integer scale for the font, 1..=8: each font pixel becomes an N×N block.
+    #[serde(default = "default_font_scale")]
+    pub font_scale: u32,
+    /// Resolved font (built-in or loaded), filled in by [`Config::load_fonts`].
+    #[serde(skip)]
+    pub face: Option<FontFace>,
     #[serde(default = "default_color")]
     pub color: Color,
     /// Ignored while scrolling.
@@ -375,6 +405,12 @@ pub struct ValueConfig {
     pub unit: Option<String>,
     #[serde(default = "default_font")]
     pub font: String,
+    /// Integer scale for the font, 1..=8: each font pixel becomes an N×N block.
+    #[serde(default = "default_font_scale")]
+    pub font_scale: u32,
+    /// Resolved font (built-in or loaded), filled in by [`Config::load_fonts`].
+    #[serde(skip)]
+    pub face: Option<FontFace>,
     /// Colour below every threshold (and above, when `thresholds` is empty).
     #[serde(default = "default_color")]
     pub color: Color,
@@ -517,6 +553,10 @@ impl ImageAlign {
     }
 }
 
+fn default_font_scale() -> u32 {
+    1
+}
+
 fn default_font() -> String {
     fonts::DEFAULT_FONT.into()
 }
@@ -565,12 +605,60 @@ impl Config {
         let mut cfg: Config = toml::from_str(text)?;
         cfg.base_dir = base_dir.to_path_buf();
         let mut errs = cfg.validate().err().map(|e| e.0).unwrap_or_default();
+        errs.extend(cfg.load_fonts());
         errs.extend(cfg.load_media());
         if errs.is_empty() {
             Ok(cfg)
         } else {
             Err(ConfigErrors(errs).into())
         }
+    }
+
+    /// Read and parse every `[[font]]` file into its `loaded` field, then
+    /// resolve each text, clock and value widget's font name to a
+    /// [`FontFace`]. Returns one message per failure. Blocking I/O:
+    /// config-load time only. A pure function of the config and the files it
+    /// names, so a reload can simply call it again.
+    pub fn load_fonts(&mut self) -> Vec<String> {
+        let mut errs = Vec::new();
+        for f in &mut self.fonts {
+            let full = self.base_dir.join(&f.path);
+            let result = std::fs::read(&full)
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| {
+                    BdfFont::parse(&String::from_utf8_lossy(&bytes)).map_err(|e| e.to_string())
+                });
+            match result {
+                Ok(font) => f.loaded = Some(Arc::new(font)),
+                Err(e) => errs.push(format!(
+                    "font {:?}: cannot load {}: {e}",
+                    f.name,
+                    full.display()
+                )),
+            }
+        }
+        let loaded: HashMap<&str, &Arc<BdfFont>> = self
+            .fonts
+            .iter()
+            .filter_map(|f| f.loaded.as_ref().map(|b| (f.name.as_str(), b)))
+            .collect();
+        let resolve = |name: &str| {
+            loaded
+                .get(name)
+                .map(|b| FontFace::Bdf(Arc::clone(b)))
+                .or_else(|| FontFace::builtin(name))
+        };
+        for s in &mut self.scenes {
+            for z in &mut s.zones {
+                match &mut z.widget {
+                    WidgetConfig::Clock(c) => c.face = resolve(&c.font),
+                    WidgetConfig::Text(t) => t.face = resolve(&t.font),
+                    WidgetConfig::Value(v) => v.face = resolve(&v.font),
+                    _ => {}
+                }
+            }
+        }
+        errs
     }
 
     /// Read and decode every `image` widget's `path` file into its `loaded`
@@ -682,6 +770,25 @@ impl Config {
             ));
         }
 
+        let mut font_names: Vec<&str> = Vec::new();
+        for (i, f) in self.fonts.iter().enumerate() {
+            if f.name.trim().is_empty() {
+                errs.push(format!("font[{i}]: name must not be empty"));
+            } else if fonts::lookup(&f.name).is_some() {
+                errs.push(format!(
+                    "font {:?}: name is already a built-in font",
+                    f.name
+                ));
+            } else if font_names.contains(&f.name.as_str()) {
+                errs.push(format!("font {:?}: duplicate font name", f.name));
+            } else {
+                font_names.push(&f.name);
+            }
+            if f.path.as_os_str().is_empty() {
+                errs.push(format!("font {:?}: path must not be empty", f.name));
+            }
+        }
+
         if self.scenes.is_empty() {
             errs.push("at least one [[scene]] is required".into());
         }
@@ -719,7 +826,7 @@ impl Config {
                         r.x, r.y, r.w, r.h, c.width, c.height
                     ));
                 }
-                validate_widget(&z.widget, &at, &mut errs);
+                validate_widget(&z.widget, &at, &font_names, &mut errs);
             }
         }
 
@@ -796,15 +903,15 @@ fn validate_sparkline(s: &SparklineConfig, at: &str, errs: &mut Vec<String>) {
     }
 }
 
-fn validate_widget(w: &WidgetConfig, at: &str, errs: &mut Vec<String>) {
-    let font = match w {
+fn validate_widget(w: &WidgetConfig, at: &str, font_names: &[&str], errs: &mut Vec<String>) {
+    let (font, scale) = match w {
         WidgetConfig::Sparkline(s) => {
             validate_sparkline(s, at, errs);
             return;
         }
         WidgetConfig::Value(v) => {
             validate_value(v, at, errs);
-            &v.font
+            (&v.font, v.font_scale)
         }
         WidgetConfig::Image(img) => {
             match (&img.path, &img.key) {
@@ -831,7 +938,7 @@ fn validate_widget(w: &WidgetConfig, at: &str, errs: &mut Vec<String>) {
                     c.format
                 ));
             }
-            &c.font
+            (&c.font, c.font_scale)
         }
         WidgetConfig::Text(t) => {
             if let Some(v) = t.scroll_px_per_s {
@@ -839,13 +946,19 @@ fn validate_widget(w: &WidgetConfig, at: &str, errs: &mut Vec<String>) {
                     errs.push(format!("{at} text: scroll_px_per_s must be > 0 (got {v})"));
                 }
             }
-            &t.font
+            (&t.font, t.font_scale)
         }
     };
-    if fonts::lookup(font).is_none() {
+    if fonts::lookup(font).is_none() && !font_names.contains(&font.as_str()) {
         errs.push(format!(
             "{at}: unknown font {font:?} (known: {})",
-            fonts::known_names()
+            fonts::known_names(font_names)
+        ));
+    }
+    if !(1..=fonts::MAX_FONT_SCALE).contains(&scale) {
+        errs.push(format!(
+            "{at}: font_scale must be 1..={} (got {scale})",
+            fonts::MAX_FONT_SCALE
         ));
     }
 }
