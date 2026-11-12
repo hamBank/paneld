@@ -7,3 +7,4 @@ rust-version.workspace = true
 description = "Packet encoding for Colorlight 5A-75B receiver cards (no I/O)"
 
 [dependencies]
+thiserror = { version = "2", default-features = false }
