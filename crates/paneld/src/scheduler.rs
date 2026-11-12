@@ -112,6 +112,14 @@ impl Scheduler {
         Ok(Scheduler::new(entries))
     }
 
+    /// Drop every condition, so all entries are always eligible. Used when
+    /// a single scene is requested by name.
+    pub fn ignore_conditions(&mut self) {
+        for e in &mut self.entries {
+            e.condition = None;
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }

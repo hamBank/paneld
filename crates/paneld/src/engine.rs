@@ -67,9 +67,10 @@ pub fn frame_channel(width: u32, height: u32) -> (FrameSender, FrameReceiver) {
 }
 
 impl RenderLoop {
-    /// Build the loop from config. With `only`, the playlist is just that
-    /// scene (its condition still applies); otherwise all scenes rotate in
-    /// config order.
+    /// Build the loop from config. With `only`, that scene is shown
+    /// permanently and its condition is ignored: asking for a scene by name
+    /// (`run --scene`) means "show me this", e.g. to check a layout before its
+    /// data source exists. Otherwise all scenes rotate in config order.
     pub fn from_config(cfg: &Config, only: Option<&str>, store: Store) -> anyhow::Result<Self> {
         let indices: Vec<usize> = match only {
             Some(name) => {
@@ -93,7 +94,13 @@ impl RenderLoop {
                 .iter()
                 .map(|&i| Scene::from_config(&cfg.scenes[i]))
                 .collect(),
-            scheduler: Scheduler::from_config(cfg, &indices)?,
+            scheduler: {
+                let mut sched = Scheduler::from_config(cfg, &indices)?;
+                if only.is_some() {
+                    sched.ignore_conditions();
+                }
+                sched
+            },
             store,
         })
     }
@@ -235,9 +242,16 @@ mod tests {
         let all = RenderLoop::from_config(&cfg, None, Store::new()).unwrap();
         assert_eq!(all.scenes.len(), cfg.scenes.len());
         assert_eq!(all.scheduler.len(), cfg.scenes.len());
-        let one = RenderLoop::from_config(&cfg, Some("banner"), Store::new()).unwrap();
+        let mut one = RenderLoop::from_config(&cfg, Some("banner"), Store::new()).unwrap();
         assert_eq!(one.scenes.len(), 1);
         assert_eq!(one.scenes[0].name(), "banner");
+        // `banner` has a condition that is false with an empty store, but a
+        // scene requested by name is shown regardless.
+        assert!(cfg.scene("banner").unwrap().condition.is_some());
+        let active = one
+            .scheduler
+            .tick(std::time::Instant::now(), &Store::new().snapshot());
+        assert_eq!(active.map(|a| a.index), Some(0));
         let e = RenderLoop::from_config(&cfg, Some("nope"), Store::new())
             .err()
             .unwrap();

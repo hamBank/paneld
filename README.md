@@ -68,7 +68,7 @@ Fonts: `4x6`, `5x7`, `5x8`, `6x9`, `6x10` (default), `6x12`, `6x13`, `7x13`, `7x
 
 ### Playlist and conditions
 
-`run` rotates through the scenes in config order, each for its `duration_s`, skipping scenes whose `condition` is false. Scene changes are logged at info level. `run --scene NAME` shows only that scene (its condition still applies). If no scene is eligible the panel goes black, and that is logged once per transition. A scene whose condition turns false while it is on screen is left immediately. If the render loop stalls, the playlist moves at most one scene per frame and never catches up on missed time. `render --scene NAME` is unchanged: one frame of one scene, conditions ignored.
+`run` rotates through the scenes in config order, each for its `duration_s`, skipping scenes whose `condition` is false. Scene changes are logged at info level. `run --scene NAME` shows only that scene, ignoring its condition, so you can check a layout before its data exists. If no scene is eligible the panel goes black, and that is logged once per transition. A scene whose condition turns false while it is on screen is left immediately. If the render loop stalls, the playlist moves at most one scene per frame and never catches up on missed time. `render --scene NAME` is unchanged: one frame of one scene, conditions ignored.
 
 A `condition` is a small expression over store keys:
 - Comparison: `key op literal` with `>`, `>=`, `<`, `<=`, `==`, `!=`; literals are numbers, `true`/`false` and quoted strings (`"..."` or `'...'`).
