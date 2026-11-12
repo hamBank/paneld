@@ -93,7 +93,7 @@ Why split the protocol out: it's testable without hardware or root, and reusable
 
 The 5A-75B takes **raw Ethernet frames** (not IP) on its Gigabit port. Known shape of the protocol from public reverse-engineering:
 
-- Pixel data goes out **per row**: each packet carries a row index, a column offset, a pixel count and **BGR** pixel bytes. Long rows may need splitting across packets.
+- Pixel data goes out **per row**: each packet carries a row index, a column offset, a pixel count and 3 bytes per pixel, at most 497 pixels per packet, so long rows are split. **The wire byte order is not fixed by the protocol:** the card forwards the 3 bytes as they come and the order that gives correct colours depends on the panel (hkubota's panel needed BGR, FPP defaults to RGB and has a per-panel colour order setting). The sink therefore needs a per-output colour order option and must not assume BGR. See `PROTOCOL.md`, "Pixel byte order".
 - After all rows, a **display/latch frame** is sent. It also carries global brightness (and colour temperature/channel scaling).
 - There is a **detection/discovery** exchange to find the card and read its info.
 - The first byte of the EtherType field is the packet type and the second is the first payload byte, so packets show up as distinct EtherTypes. For example, the display frame is `0x0107`. PanelPlayer's README says `0x0101`, but its code, like every other reference, sends `0x0107`. See `crates/colorlight-proto/PROTOCOL.md`.
@@ -109,18 +109,19 @@ Record the confirmed layouts in `crates/colorlight-proto/PROTOCOL.md` with links
 
 ### 4.2 Card configuration prerequisites
 - Panel size, scan type, chaining order etc. are configured **on the card** with Colorlight's LEDVision (Windows) once. The daemon only sends pixels.
-- Firmware: V13.x broke raw senders that worked on 11.04 and older. FPP fixed it (reference 5) as follows. **To be confirmed against the source and captures before M1 code is written:**
-  - Discover receivers at startup with a `0x07` packet. Each card answers with `0x08`, which carries the firmware major/minor version and the card's configured width/height.
+- Firmware: V13.x broke raw senders that worked on 11.04 and older. FPP fixed it (reference 5) as follows. **The packet layouts are confirmed in `crates/colorlight-proto/PROTOCOL.md` (with sources). The V13 behaviour itself (the doubling and the version cut-off) rests on FPP alone; no other reference knows about V13:**
+  - Discover receivers at startup with a `0x07` packet. Each card answers with `0x08`, which carries the firmware major/minor version and the card's configured width/height. The request carries a receiver index (0, 1, ...); ask for 0, then 1, and so on until nobody answers. colorlight.rs's "ack" is just the request for index 1.
   - Per frame: brightness (`0x0A`), then the `0x55` row packets, then a short gap (FPP default 500 µs), then the `0x01` display/sync packet.
   - On firmware **≥ 13**, send `0x01` (and `0x0A`) **twice**, back to back. Older firmware flickers if it gets two, so the count must follow the detected version.
-  - Mixing old and new firmware on one chain is not supported, by FPP or by us.
+  - `colorlight-proto::needs_double_sync(major)` is the rule (major >= 13).
+- Mixing old and new firmware on one chain is not supported, by FPP or by us.
 - What we do: `probe` prints each card's firmware version and configured size. `ColorlightSink` discovers cards on startup and picks the sync count from the result. An optional `firmware_major` override on the output covers cards that don't answer discovery. Log a warning if cards on one interface disagree, or if the card's reported size doesn't match the configured regions.
 - Deploy docs still recommend a known-good firmware (11.04 for this build). Supporting 13.x is still worth doing, because some panel types reportedly refresh better on 13.x (see the FPP issue).
 
 ### 4.3 Transport (`colorlight-net`)
 - Linux `AF_PACKET` raw socket bound to a configured interface (e.g. `eth1`). Use `socket2` or `pnet_datalink`; prefer minimal deps.
 - Requires `CAP_NET_RAW`. Run via systemd `AmbientCapabilities=CAP_NET_RAW`. No full root.
-- Batch sends per frame. Measure: a full frame for 2× 172×86 (172×172, ~89 KB of BGR) is small, but 4+ panels at 60 fps should still be well inside Gigabit. Keep a per-frame send-time metric.
+- Batch sends per frame. Measure: a full frame for 2× 172×86 (172×172, ~89 KB of pixel data) is small, but 4+ panels at 60 fps should still be well inside Gigabit. Keep a per-frame send-time metric.
 - Gate behind `cfg(target_os = "linux")`. On macOS/Windows the crate compiles to a stub that errors at runtime, so devs can still build the daemon and use the preview sink.
 
 ### 4.4 Multiple panels / cards
@@ -370,5 +371,6 @@ Each milestone ends with: tests green, `cargo clippy -- -D warnings` clean, READ
 - ~~Exact panel resolution and scan rate~~ **Answered:** 172×86, 1/43 scan (86 rows / 2 = 43 scan lines, the usual two-halves HUB75 layout). Needed for the LEDVision settings in `deploy/README.md`.
 - Card firmware version currently installed. Plan: flash V11.x (11.04 if available). Either way the sink detects the version (§4.2).
 - ~~Side-by-side or stacked~~ **Answered:** stacked vertically, canvas 172×172.
+- Pixel byte order of the actual panels (RGB or BGR). The protocol doesn't say; confirm with the M1 `test-pattern`, then set the output's colour order.
 - Which HUB75 port(s) each panel is on and how the card maps them (sets `card_offset` in the M1 output map). Confirm in LEDVision.
 - Which HA entities and external APIs to show first (drives M3 priorities).
