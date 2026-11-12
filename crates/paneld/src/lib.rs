@@ -16,4 +16,5 @@ pub mod preview;
 pub mod render;
 pub mod scene;
 pub mod store;
+pub mod test_pattern;
 pub mod widgets;

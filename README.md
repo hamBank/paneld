@@ -30,6 +30,12 @@ cargo run -p paneld -- check --config config/example.toml
 cargo run -p paneld -- render --config config/example.toml --scene home --out frame.png --scale 8
 ```
 
+```bash
+cargo run -p paneld -- test-pattern --width 172 --height 172 --panel-width 172 --panel-height 86 --pattern panel-ids --out pattern.png --scale 4
+```
+
+`test-pattern` draws a bring-up pattern for checking the card's mapping: `bars`, `gradient`, `panel-ids` (border colour, index number and a top-left corner marker per panel, row-major from the top-left), `grid` (every 8 px, with each panel's top and left edge in cyan and its scan-half row `panel-height / 2` in yellow), `solid` (`--color "#rrggbb"`, default white) and `walk` (one pixel in raster order, position set by `--frame`). Panels default to the whole canvas, and partial panels at the edges are clipped. For now it only writes a PNG (`--out` is required, `--scale` works as for `render`). Sending to the card with `--interface` comes with the Colorlight sink.
+
 `render` also takes `--time <RFC 3339>` and `--elapsed <seconds>` for reproducible output.
 
 ## Config (M0)
