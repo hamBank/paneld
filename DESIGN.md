@@ -360,6 +360,8 @@ Logging: `tracing` with env-filter; JSON output option for journald.
 ---
 
 ## 14. Milestones
+CI (GitHub Actions: fmt, clippy, tests, an aarch64 check for the Pi, a macOS check for the non-Linux stub, and MSRV) was brought forward from M5 Ops to the middle of M1, so every later phase lands on a green build.
+
 1. **M0 Skeleton**: workspace, config parsing, canvas, render loop, preview sink, `clock` + `text` widgets, `paneld render`. Runs on a laptop.
 2. **M1 Hardware**: `colorlight-proto` (with PROTOCOL.md + tests), `colorlight-net`, `probe`, `test-pattern`, ColorlightSink, gamma/brightness. Two panels lit on the Pi.
 3. **M2 Scenes**: zones, playlist rotation, conditions, `value`/`image`/`sparkline` widgets, hot reload.
