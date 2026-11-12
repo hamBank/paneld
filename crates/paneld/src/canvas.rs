@@ -138,6 +138,13 @@ impl ZoneTarget<'_> {
         self.rect.h
     }
 
+    /// The pixel at zone-local `(x, y)`, or `None` outside the zone.
+    pub fn pixel(&self, x: u32, y: u32) -> Option<Rgb888> {
+        (x < self.rect.w && y < self.rect.h)
+            .then(|| self.canvas.pixel(self.rect.x + x, self.rect.y + y))
+            .flatten()
+    }
+
     /// Fill the whole zone with one colour.
     pub fn fill(&mut self, c: Rgb888) {
         for y in self.rect.y..self.rect.y + self.rect.h {

@@ -26,6 +26,7 @@ fn example_config_is_valid() {
     assert_eq!((cfg.canvas.width, cfg.canvas.height), (172, 172));
     assert!(cfg.preview().is_some());
     assert!(cfg.scene("home").is_some());
+    assert!(cfg.scene("image").is_some());
 }
 
 #[test]
@@ -270,4 +271,90 @@ fn colorlight_rejects_duplicate_interface() {
         "{e}"
     );
     assert!(!e.contains("output[1]"), "{e}");
+}
+
+fn media_dir() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/media")
+}
+
+fn image_cfg(widget: &str) -> String {
+    format!(
+        "{MINIMAL}  [[scene.zone]]\n  rect = {{ x = 0, y = 0, w = 8, h = 8 }}\n  widget = {{ type = \"image\", {widget} }}\n"
+    )
+}
+
+fn image_err(widget: &str) -> String {
+    format!(
+        "{:#}",
+        Config::parse_in(&image_cfg(widget), &media_dir()).expect_err("should be rejected")
+    )
+}
+
+#[test]
+fn image_defaults_and_loading_relative_to_base_dir() {
+    use paneld::config::{Fit, ImageAlign};
+    let cfg = Config::parse_in(&image_cfg(r#"path = "anim.gif""#), &media_dir()).unwrap();
+    let WidgetConfig::Image(i) = &cfg.scenes[0].zones[0].widget else {
+        panic!("expected image");
+    };
+    assert_eq!(i.fit, Fit::Contain);
+    assert_eq!(i.align, ImageAlign::Center);
+    assert!(!i.smooth);
+    assert!(i.looping);
+    assert_eq!(i.loaded.as_ref().unwrap().frames().len(), 3);
+    assert_eq!(cfg.base_dir, media_dir());
+}
+
+#[test]
+fn image_options_parse() {
+    use paneld::config::{Fit, ImageAlign};
+    let cfg = Config::parse_in(
+        &image_cfg(
+            r#"key = "media:x", fit = "cover", align = "bottom_right", smooth = true, loop = false"#,
+        ),
+        &media_dir(),
+    )
+    .unwrap();
+    let WidgetConfig::Image(i) = &cfg.scenes[0].zones[0].widget else {
+        panic!("expected image");
+    };
+    assert_eq!(i.key.as_deref(), Some("media:x"));
+    assert!(i.loaded.is_none());
+    assert_eq!(i.fit, Fit::Cover);
+    assert_eq!(i.align, ImageAlign::BottomRight);
+    assert!(i.smooth && !i.looping);
+}
+
+#[test]
+fn image_needs_exactly_one_of_path_and_key() {
+    let e = image_err("");
+    assert!(e.contains("one of path or key is required"), "{e}");
+    let e = image_err(r#"path = "palette.png", key = "media:x""#);
+    assert!(e.contains("set either path or key, not both"), "{e}");
+    let e = image_err(r#"key = " ""#);
+    assert!(e.contains("key must not be empty"), "{e}");
+}
+
+#[test]
+fn image_load_errors_name_the_file_and_the_reason() {
+    let e = image_err(r#"path = "nope.png""#);
+    assert!(e.contains(r#"scene "a" zone[0] image: cannot load"#), "{e}");
+    assert!(e.contains("nope.png"), "{e}");
+    assert!(e.contains("cannot read file"), "{e}");
+
+    // A file that exists but is not an image.
+    let e = image_err(r#"path = "make_fixtures.py""#);
+    assert!(e.contains("make_fixtures.py"), "{e}");
+    assert!(e.contains("unsupported image format"), "{e}");
+}
+
+#[test]
+fn image_enums_reject_unknown_values() {
+    assert!(image_err(r#"path = "palette.png", fit = "zoom""#).contains("unknown variant `zoom`"));
+    assert!(
+        image_err(r#"path = "palette.png", align = "middle""#).contains("unknown variant `middle`")
+    );
+    assert!(
+        image_err(r#"path = "palette.png", looping = false"#).contains("unknown field `looping`")
+    );
 }

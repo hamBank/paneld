@@ -152,7 +152,8 @@ Applied per sink (so the preview can show "true" colours while the panel gets co
 - Auto-dim: schedule-based (sunset/sunrise, quiet hours) or driven by a HA lux sensor entity
 
 ### 5.3 Data store
-- Map of `Key → Value` where `Value` is an enum: `Number(f64, unit)`, `Text`, `Bool`, `Image(Arc<RgbaImage>)`, `Series(Vec<(ts, f64)>)`, `Json`.
+- Map of `Key → Value` where `Value` is an enum: `Number(f64, unit)`, `Text`, `Bool`, `Image(Arc<Bitmap>)`, `Series(Vec<(ts, f64)>)`, `Json`.
+- `Bitmap` (`media.rs`) is our own small straight-alpha RGBA8 type instead of the `image` crate's `RgbaImage`: the `image` crate pulls in a large codec tree, and we only need PNG (the `png` crate we already use) and GIF (the `gif` crate). Widgets detect a new image by `Arc::ptr_eq`.
 - Each entry records `updated_at` and source, so widgets can show staleness.
 - Implementation: `ArcSwap<HashMap>` or `RwLock` plus a `tokio::sync::watch` for change notifications. Render reads must be cheap and lock-light.
 
@@ -166,6 +167,7 @@ Applied per sink (so the preview can show "true" colours while the panel gets co
       fn draw(&self, target: &mut ZoneTarget<'_>);                 // clipped to zone
   }
   ```
+- `image` widget (M2): `path` (file, relative to the config file) or `key` (a `Value::Image` in the store), `fit` (`contain` default, `cover`, `stretch`, `none`), `align`, `smooth`, `loop`. Scaling is nearest-neighbour unless `smooth` (box filter on axes that shrink), results are cached per (image, zone size), and alpha is blended over the zone background. GIF frames are composited in full (disposal methods and transparency honoured) and picked from `FrameCtx::scene_elapsed`; delays under 20 ms count as 100 ms, like browsers. File decoding happens at config load time (`Config::load_media`), never on the render thread. A future video widget fits the same shape: decode off-thread into frames the widget selects by `scene_elapsed`. `Widget` gained an optional `prepare(zone_w, zone_h)` hook so scaling can be done before the first frame; the widget also copes if it is never called.
 - Initial widgets: `clock`, `text` (static/scrolling, templated from store keys), `value` (number + unit + icon + threshold colours), `sparkline/graph` (from `Series`), `image` (static or GIF), `progress bar`, `icon`.
 - Templating: a small template syntax for text, e.g. `"{ha:sensor.outside_temp:.1}°"`. Keep it minimal and implement it yourself or with a tiny crate. Don't pull in a full template engine.
 - Fonts: bitmap fonts via `embedded-graphics` mono fonts plus BDF loading (e.g. `bdf-parser` / `eg-bdf`) for nicer pixel fonts.
@@ -198,7 +200,7 @@ Initial sources:
 3. **HTTP poll**: URL + interval + JSON path(s) → keys. Covers weather and generic APIs.
 4. **Prometheus query**: instant queries (and range queries for sparklines) against a Prometheus URL → `Number`/`Series`.
 5. **Clock/system**: time, date, uptime, local CPU temp.
-6. **Media folder**: images/GIFs loaded and scaled to zone size on demand (cached).
+6. **Media folder**: images/GIFs loaded and scaled to zone size on demand (cached). *(M2 only has what the `image` widget needs: `path` files decoded at config load. The folder source, async loading and `media:` keys arrive in M3.)*
 7. **HTTP push** (via control API, §7): external scripts write keys or raise notifications.
 
 ---

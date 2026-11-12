@@ -9,13 +9,21 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
-/// A stored value. More variants (`Image`, `Series`, `Json`) arrive with the
-/// widgets and sources that need them.
+use crate::media::Bitmap;
+
+/// A stored value. More variants (`Series`, `Json`) arrive with the widgets
+/// and sources that need them.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
-    Number { value: f64, unit: Option<String> },
+    Number {
+        value: f64,
+        unit: Option<String>,
+    },
     Text(String),
     Bool(bool),
+    /// A decoded image. Shared, so cloning a value or a snapshot is cheap and
+    /// widgets can tell a new image from the old one by pointer.
+    Image(Arc<Bitmap>),
 }
 
 /// A value plus where and when it came from, so widgets can show staleness.
