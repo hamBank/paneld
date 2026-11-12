@@ -1,6 +1,12 @@
 # paneld example config. See DESIGN.md §8 for the full planned schema;
 # only what the current milestone implements is accepted here.
 
+# Edits to this file are picked up live by `paneld run` (polled every second,
+# applied once the content is stable; `kill -HUP` reloads at once). Scenes,
+# zones, widgets and the playlist reload; canvas size, canvas.fps, [http] and
+# [[output]] need a restart (a size change is rejected). A config with errors
+# is logged and ignored; the old one keeps running.
+
 [canvas]
 width = 172        # two 172x86 panels (1/43 scan) stacked vertically
 height = 172

@@ -4,6 +4,7 @@
 //! a capacity-1 channel where the latest frame wins.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -30,6 +31,50 @@ pub struct RenderStats {
     pub frames_skipped: AtomicU64,
 }
 
+/// Everything a config reload replaces: the scenes (with prepared widgets)
+/// and the playlist over them. Built off the render thread (see
+/// `crate::reload`) and swapped in whole.
+pub struct SceneSet {
+    /// Every scene, each with its own widget state. The scheduler's indices
+    /// refer to this list.
+    pub scenes: Vec<Scene>,
+    pub scheduler: Scheduler,
+}
+
+impl SceneSet {
+    /// Build the playlist from config. With `only`, that scene is shown
+    /// permanently and its condition is ignored: asking for a scene by name
+    /// (`run --scene`) means "show me this", e.g. to check a layout before its
+    /// data source exists. Otherwise all scenes rotate in config order.
+    pub fn from_config(cfg: &Config, only: Option<&str>) -> anyhow::Result<Self> {
+        let indices: Vec<usize> = match only {
+            Some(name) => {
+                let i = cfg
+                    .scenes
+                    .iter()
+                    .position(|s| s.name == name)
+                    .with_context(|| {
+                        let names: Vec<_> = cfg.scenes.iter().map(|s| s.name.as_str()).collect();
+                        format!("no scene named {name:?} (have: {})", names.join(", "))
+                    })?;
+                vec![i]
+            }
+            None => (0..cfg.scenes.len()).collect(),
+        };
+        let mut scheduler = Scheduler::from_config(cfg, &indices)?;
+        if only.is_some() {
+            scheduler.ignore_conditions();
+        }
+        Ok(SceneSet {
+            scenes: indices
+                .iter()
+                .map(|&i| Scene::from_config(&cfg.scenes[i]))
+                .collect(),
+            scheduler,
+        })
+    }
+}
+
 pub struct RenderLoop {
     pub width: u32,
     pub height: u32,
@@ -39,6 +84,9 @@ pub struct RenderLoop {
     pub scenes: Vec<Scene>,
     pub scheduler: Scheduler,
     pub store: Store,
+    /// Prepared scene sets from the config reloader. Polled without blocking
+    /// at the top of every frame.
+    pub reload: Option<Receiver<SceneSet>>,
 }
 
 /// Handle to a running render loop. Dropping it does not stop the loop;
@@ -67,42 +115,49 @@ pub fn frame_channel(width: u32, height: u32) -> (FrameSender, FrameReceiver) {
 }
 
 impl RenderLoop {
-    /// Build the loop from config. With `only`, that scene is shown
-    /// permanently and its condition is ignored: asking for a scene by name
-    /// (`run --scene`) means "show me this", e.g. to check a layout before its
-    /// data source exists. Otherwise all scenes rotate in config order.
+    /// Build the loop from config; see [`SceneSet::from_config`] for `only`.
     pub fn from_config(cfg: &Config, only: Option<&str>, store: Store) -> anyhow::Result<Self> {
-        let indices: Vec<usize> = match only {
-            Some(name) => {
-                let i = cfg
-                    .scenes
-                    .iter()
-                    .position(|s| s.name == name)
-                    .with_context(|| {
-                        let names: Vec<_> = cfg.scenes.iter().map(|s| s.name.as_str()).collect();
-                        format!("no scene named {name:?} (have: {})", names.join(", "))
-                    })?;
-                vec![i]
-            }
-            None => (0..cfg.scenes.len()).collect(),
-        };
+        let set = SceneSet::from_config(cfg, only)?;
         Ok(RenderLoop {
             width: cfg.canvas.width,
             height: cfg.canvas.height,
             fps: cfg.canvas.fps,
-            scenes: indices
-                .iter()
-                .map(|&i| Scene::from_config(&cfg.scenes[i]))
-                .collect(),
-            scheduler: {
-                let mut sched = Scheduler::from_config(cfg, &indices)?;
-                if only.is_some() {
-                    sched.ignore_conditions();
-                }
-                sched
-            },
+            scenes: set.scenes,
+            scheduler: set.scheduler,
             store,
+            reload: None,
         })
+    }
+
+    /// Take prepared scene sets from `rx` (config hot reload).
+    pub fn with_reload(mut self, rx: Receiver<SceneSet>) -> Self {
+        self.reload = Some(rx);
+        self
+    }
+
+    /// Non-blocking check for a reloaded scene set; swaps in the newest one
+    /// if several are queued. Returns whether a swap happened. The new
+    /// playlist starts fresh at its first eligible scene.
+    fn apply_reload(&mut self) -> bool {
+        let Some(rx) = &self.reload else {
+            return false;
+        };
+        let mut latest = None;
+        loop {
+            match rx.try_recv() {
+                Ok(set) => latest = Some(set),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.reload = None;
+                    break;
+                }
+            }
+        }
+        let Some(set) = latest else { return false };
+        self.scenes = set.scenes;
+        self.scheduler = set.scheduler;
+        tracing::info!("config reloaded: {} scenes", self.scenes.len());
+        true
     }
 
     pub fn spawn(self, tx: FrameSender) -> std::io::Result<RenderHandle> {
@@ -137,6 +192,12 @@ impl RenderLoop {
             let now = Instant::now();
             if now < next {
                 std::thread::sleep(next - now);
+            }
+
+            if self.apply_reload() {
+                // Log the first scene of the new playlist even if its index
+                // and name match the old one.
+                shown = None;
             }
 
             let snapshot = self.store.snapshot();
@@ -208,6 +269,7 @@ mod tests {
             scenes: vec![Scene::from_config(&cfg.scenes[0])],
             scheduler: Scheduler::from_config(&cfg, &[0]).unwrap(),
             store: Store::new(),
+            reload: None,
         }
         .spawn(tx)
         .unwrap();
@@ -256,5 +318,86 @@ mod tests {
             .err()
             .unwrap();
         assert!(format!("{e:#}").contains("no scene named \"nope\" (have: home, banner, image)"));
+    }
+
+    fn solid_cfg(color: &str) -> Config {
+        Config::parse(&format!(
+            r##"
+            [canvas]
+            width = 16
+            height = 8
+            fps = 60
+            [[scene]]
+            name = "s"
+              [[scene.zone]]
+              rect = {{ x = 0, y = 0, w = 16, h = 8 }}
+              background = "{color}"
+              widget = {{ type = "text", text = "" }}
+            "##
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn swaps_in_a_reloaded_scene_set() {
+        use embedded_graphics::pixelcolor::Rgb888;
+        let (tx, mut rx) = frame_channel(16, 8);
+        let (reload_tx, reload_rx) = std::sync::mpsc::channel();
+        let handle = RenderLoop::from_config(&solid_cfg("#ff0000"), None, Store::new())
+            .unwrap()
+            .with_reload(reload_rx)
+            .spawn(tx)
+            .unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                // Wait for a red frame, then send the blue scene set.
+                while rx.borrow().pixel(3, 3) != Some(Rgb888::new(255, 0, 0)) {
+                    rx.changed().await.unwrap();
+                }
+                reload_tx
+                    .send(SceneSet::from_config(&solid_cfg("#0000ff"), None).unwrap())
+                    .unwrap();
+                while rx.borrow().pixel(3, 3) != Some(Rgb888::new(0, 0, 255)) {
+                    rx.changed().await.unwrap();
+                }
+            })
+            .await
+            .expect("frames from the new scene set within 5s");
+        });
+        handle.stop();
+    }
+
+    #[test]
+    fn apply_reload_keeps_the_latest_and_survives_a_dropped_sender() {
+        let mut lp = RenderLoop::from_config(&solid_cfg("#ff0000"), None, Store::new()).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        lp = lp.with_reload(rx);
+        assert!(!lp.apply_reload());
+        let two = Config::parse(
+            r##"
+            [canvas]
+            width = 16
+            height = 8
+            [[scene]]
+            name = "a"
+            [[scene]]
+            name = "b"
+            "##,
+        )
+        .unwrap();
+        tx.send(SceneSet::from_config(&solid_cfg("#00ff00"), None).unwrap())
+            .unwrap();
+        tx.send(SceneSet::from_config(&two, None).unwrap()).unwrap();
+        drop(tx);
+        assert!(lp.apply_reload());
+        assert_eq!(lp.scenes.len(), 2);
+        assert_eq!(lp.scheduler.len(), 2);
+        assert!(!lp.apply_reload());
+        assert!(lp.reload.is_none());
     }
 }
