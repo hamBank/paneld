@@ -366,10 +366,11 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
-    let cfg = Config::load(&config_path)?;
+    let (cfg, loaded_text) = Config::load_with_text(&config_path)?;
     let (tx, rx) = frame_channel(cfg.canvas.width, cfg.canvas.height);
     let (reload_tx, reload_rx) = std::sync::mpsc::channel();
-    let reload_ctx = reload::ReloadCtx::new(&config_path, &cfg, scene.as_deref());
+    let reload_ctx =
+        reload::ReloadCtx::new(&config_path, &cfg, scene.as_deref()).loaded_from(&loaded_text);
     let reload_stats = std::sync::Arc::new(reload::ReloadStats::default());
     let render = RenderLoop::from_config(&cfg, scene.as_deref(), Store::new())?
         .with_reload(reload_rx)

@@ -544,10 +544,18 @@ impl std::error::Error for ConfigErrors {}
 impl Config {
     /// Read, parse and validate a config file.
     pub fn load(path: &Path) -> anyhow::Result<Config> {
+        Config::load_with_text(path).map(|(cfg, _)| cfg)
+    }
+
+    /// Like [`Config::load`], also returning the exact text that was loaded,
+    /// so a file watcher can start from what is actually running.
+    pub fn load_with_text(path: &Path) -> anyhow::Result<(Config, String)> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading config {}", path.display()))?;
         let base = path.parent().unwrap_or(Path::new(""));
-        Config::parse_in(&text, base).with_context(|| format!("loading config {}", path.display()))
+        let cfg = Config::parse_in(&text, base)
+            .with_context(|| format!("loading config {}", path.display()))?;
+        Ok((cfg, text))
     }
 
     /// Parse and validate config text. Relative media paths resolve against

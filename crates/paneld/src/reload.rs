@@ -32,8 +32,6 @@
 //! # Limitations
 //! - Image files referenced by the config are not watched. Edit the config
 //!   (any change) or send SIGHUP to pick up a changed image.
-//! - A change made between the daemon's initial load and the watcher's first
-//!   poll is missed until the next edit.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -80,10 +78,18 @@ pub struct ConfigWatcher {
 
 impl ConfigWatcher {
     /// Start watching; the current content counts as already applied.
+    /// Start from whatever the file holds now.
     pub fn new(path: &Path) -> Self {
+        Self::with_baseline(path, std::fs::read(path).ok().as_deref())
+    }
+
+    /// Start from `loaded`, the content that is actually running. An edit
+    /// made after it was read (even before the watcher exists) is then seen
+    /// as a change.
+    pub fn with_baseline(path: &Path, loaded: Option<&[u8]>) -> Self {
         ConfigWatcher {
             path: path.to_path_buf(),
-            applied: std::fs::read(path).ok().map(|b| hash(&b)),
+            applied: loaded.map(hash),
             pending: None,
         }
     }
@@ -169,6 +175,9 @@ pub struct ReloadCtx {
     pub running: RestartOnly,
     /// `run --scene X`: keep showing X.
     pub only: Option<String>,
+    /// The config text that is running, if known. The watcher starts from
+    /// it, so no edit is missed between the initial load and the first poll.
+    pub loaded: Option<Vec<u8>>,
 }
 
 impl ReloadCtx {
@@ -177,7 +186,14 @@ impl ReloadCtx {
             path: path.to_path_buf(),
             running: RestartOnly::from_config(running_cfg),
             only: only.map(str::to_owned),
+            loaded: None,
         }
+    }
+
+    /// Record the exact text the running config was loaded from.
+    pub fn loaded_from(mut self, text: &str) -> Self {
+        self.loaded = Some(text.as_bytes().to_vec());
+        self
     }
 
     /// Turn the new file content into a scene set, or say why not. Blocking
@@ -298,7 +314,10 @@ pub fn spawn(ctx: ReloadCtx, tx: Sender<SceneSet>, stats: Arc<ReloadStats>) {
             Err(e) => tracing::error!(error = %e, "listening for SIGHUP"),
         }
     }
-    let watcher = ConfigWatcher::new(&ctx.path);
+    let watcher = match &ctx.loaded {
+        Some(bytes) => ConfigWatcher::with_baseline(&ctx.path, Some(bytes)),
+        None => ConfigWatcher::new(&ctx.path),
+    };
     tokio::spawn(watch(ctx, watcher, tx, stats, POLL_INTERVAL, force));
 }
 
@@ -445,6 +464,23 @@ mod tests {
         std::fs::write(&f, "one").unwrap();
         assert_eq!(w.poll(), None);
         assert_eq!(w.poll(), Some(b"one".to_vec()));
+    }
+
+    #[test]
+    fn watcher_with_baseline_sees_an_edit_made_before_it_existed() {
+        let dir = TempDir::new();
+        let f = dir.file("c.toml");
+        // The daemon loaded "one"; the file was edited before the watcher
+        // started. Starting from the loaded text, the edit is not lost.
+        std::fs::write(&f, "two").unwrap();
+        let mut w = ConfigWatcher::with_baseline(&f, Some(b"one"));
+        assert_eq!(w.poll(), None);
+        assert_eq!(w.poll(), Some(b"two".to_vec()));
+
+        // Baseline equal to the file: nothing to do.
+        let mut w = ConfigWatcher::with_baseline(&f, Some(b"two"));
+        assert_eq!(w.poll(), None);
+        assert_eq!(w.poll(), None);
     }
 
     #[test]
