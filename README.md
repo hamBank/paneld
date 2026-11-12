@@ -8,7 +8,9 @@ Architecture, config schema and roadmap are in [`DESIGN.md`](DESIGN.md).
 
 **M0 (skeleton) is done.** It includes the config parsing and validation, canvas, render loop, HTTP preview sink, `clock` and `text` widgets, and the `run`, `check` and `render` commands. It runs on a laptop without hardware.
 
-Not built yet: Colorlight output (M1), scene rotation and more widgets (M2), data sources (M3), control API and MQTT (M4). See `DESIGN.md` §14.
+**M1 (hardware) is code-complete, but untested on a real card.** It adds `colorlight-proto` (packet encoding), `colorlight-net` (Linux raw-socket transport, discovery), the Colorlight sink behind `[[output]] type = "colorlight"`, `paneld probe` and `paneld test-pattern --interface`. Bring-up on the Pi follows [`deploy/README.md`](deploy/README.md); the result (firmware version, port mapping, colour order) is still to be recorded, see `DESIGN.md` §15. The sink only works on Linux; other platforms build a stub.
+
+Not built yet: scene rotation and more widgets (M2), data sources (M3), control API and MQTT (M4). See `DESIGN.md` §14.
 
 ## Hardware
 
@@ -34,11 +36,18 @@ cargo run -p paneld -- render --config config/example.toml --scene home --out fr
 cargo run -p paneld -- test-pattern --width 172 --height 172 --panel-width 172 --panel-height 86 --pattern panel-ids --out pattern.png --scale 4
 ```
 
-`test-pattern` draws a bring-up pattern for checking the card's mapping: `bars`, `gradient`, `panel-ids` (border colour, index number and a top-left corner marker per panel, row-major from the top-left), `grid` (every 8 px, with each panel's top and left edge in cyan and its scan-half row `panel-height / 2` in yellow), `solid` (`--color "#rrggbb"`, default white) and `walk` (one pixel in raster order, position set by `--frame`). Panels default to the whole canvas, and partial panels at the edges are clipped. For now it only writes a PNG (`--out` is required, `--scale` works as for `render`). Sending to the card with `--interface` comes with the Colorlight sink.
+`test-pattern` draws a bring-up pattern for checking the card's mapping: `bars`, `gradient`, `panel-ids` (border colour, index number and a top-left corner marker per panel, row-major from the top-left), `grid` (every 8 px, with each panel's top and left edge in cyan and its scan-half row `panel-height / 2` in yellow), `solid` (`--color "#rrggbb"`, default white) and `walk` (one pixel in raster order, position set by `--frame`). Panels default to the whole canvas, and partial panels at the edges are clipped. `--out` writes a PNG (`--scale` works as for `render`). `--interface <nic>` sends the pattern to the card continuously until Ctrl-C (`walk` animates), with `--fps` (default 30), `--brightness` (default 64), `--gamma` (default 1.0), `--color-order`, `--firmware-major` and `--sync-gap-us`. Give `--out`, `--interface` or both. Sending needs `CAP_NET_RAW`; see [`deploy/README.md`](deploy/README.md).
+
+```bash
+paneld probe --interface eth1            # list cards: model, firmware, reported size
+paneld test-pattern --width 172 --height 172 --panel-height 86 --pattern panel-ids --interface eth1
+```
+
+`probe` prints each receiver's index, model, firmware version, reported width x height and whether it needs double sync, and exits non-zero if nothing answers (`--timeout-ms`, default 500, is the wait per request).
 
 `render` also takes `--time <RFC 3339>` and `--elapsed <seconds>` for reproducible output.
 
-## Config (M0)
+## Config (M1)
 
 See [`config/example.toml`](config/example.toml). Unknown keys are rejected, and validation reports every problem at once.
 
@@ -46,7 +55,7 @@ See [`config/example.toml`](config/example.toml). Unknown keys are rejected, and
 |---|---|
 | `[canvas]` | `width`, `height`, `fps` (1–60, default 30) |
 | `[[output]]` | `type = "preview"`, `scale` (1–32, default 8), `grid` (default false) |
-| `[[output]]` | `type = "colorlight"`, `interface` (required), `gamma` (1.0–4.0, default 2.2), `brightness` (0–255, default 255), `white_point` (`#rrggbb`, default `#ffffff`), `brightness_mode` (`hardware` default, or `software`), `firmware_major` (optional override), `sync_gap_us` (0–20000, default 500). One output per interface. The sink is not implemented yet: the output is parsed and validated, then ignored with a warning. Multi-region maps come in M6. |
+| `[[output]]` | `type = "colorlight"`, `interface` (required), `gamma` (1.0–4.0, default 2.2), `brightness` (0–255, default 255), `white_point` (`#rrggbb`, default `#ffffff`), `brightness_mode` (`hardware` default, or `software`), `color_order` (`rgb` default, `rbg`, `grb`, `gbr`, `brg`, `bgr`: what the three wire bytes carry; the right value depends on the panel), `firmware_major` (optional override if discovery fails), `sync_gap_us` (0–20000, default 500). One output per interface. The whole canvas goes to card origin (0,0); multi-region maps come in M6. |
 | `[http]` | `bind` (default `127.0.0.1:8080`) |
 | `[[scene]]` | `name`, `[[scene.zone]]` with `rect = { x, y, w, h }`, `widget`, optional `background = "#rrggbb"` |
 
