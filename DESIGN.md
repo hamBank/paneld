@@ -96,7 +96,7 @@ The 5A-75B takes **raw Ethernet frames** (not IP) on its Gigabit port. Known sha
 - Pixel data goes out **per row**: each packet carries a row index, a column offset, a pixel count and **BGR** pixel bytes. Long rows may need splitting across packets.
 - After all rows, a **display/latch frame** is sent. It also carries global brightness (and colour temperature/channel scaling).
 - There is a **detection/discovery** exchange to find the card and read its info.
-- Distinct EtherTypes identify the packet types (PanelPlayer documents EtherType `0x0101` among others).
+- The first byte of the EtherType field is the packet type and the second is the first payload byte, so packets show up as distinct EtherTypes. For example, the display frame is `0x0107`. PanelPlayer's README says `0x0101`, but its code, like every other reference, sends `0x0107`. See `crates/colorlight-proto/PROTOCOL.md`.
 
 **Do not trust the byte layouts from memory or from this document.** Before writing `colorlight-proto`, read and reconcile:
 1. hkubota, "Winter project: Colorlight 5A-75B protocol": https://hkubota.wordpress.com/2022/01/31/winter-project-colorlight-5a-75b-protocol/
