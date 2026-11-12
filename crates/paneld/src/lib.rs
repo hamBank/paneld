@@ -7,12 +7,15 @@
 
 pub mod canvas;
 pub mod color;
+pub mod colorlight_sink;
 pub mod config;
 pub mod engine;
 pub mod fonts;
 pub mod png_io;
+pub mod postprocess;
 pub mod preview;
 pub mod render;
 pub mod scene;
 pub mod store;
+pub mod test_pattern;
 pub mod widgets;

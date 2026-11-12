@@ -93,27 +93,38 @@ Why split the protocol out: it's testable without hardware or root, and reusable
 
 The 5A-75B takes **raw Ethernet frames** (not IP) on its Gigabit port. Known shape of the protocol from public reverse-engineering:
 
-- Pixel data goes out **per row**: each packet carries a row index, a column offset, a pixel count and **BGR** pixel bytes. Long rows may need splitting across packets.
+- Pixel data goes out **per row**: each packet carries a row index, a column offset, a pixel count and 3 bytes per pixel, at most 497 pixels per packet, so long rows are split. **The wire byte order is not fixed by the protocol:** the card forwards the 3 bytes as they come and the order that gives correct colours depends on the panel (hkubota's panel needed BGR, FPP defaults to RGB and has a per-panel colour order setting). The sink therefore needs a per-output colour order option and must not assume BGR. See `PROTOCOL.md`, "Pixel byte order".
 - After all rows, a **display/latch frame** is sent. It also carries global brightness (and colour temperature/channel scaling).
 - There is a **detection/discovery** exchange to find the card and read its info.
-- Distinct EtherTypes identify the packet types (PanelPlayer documents EtherType `0x0101` among others).
+- The first byte of the EtherType field is the packet type and the second is the first payload byte, so packets show up as distinct EtherTypes. For example, the display frame is `0x0107`. PanelPlayer's README says `0x0101`, but its code, like every other reference, sends `0x0107`. See `crates/colorlight-proto/PROTOCOL.md`.
 
 **Do not trust the byte layouts from memory or from this document.** Before writing `colorlight-proto`, read and reconcile:
 1. hkubota, "Winter project: Colorlight 5A-75B protocol": https://hkubota.wordpress.com/2022/01/31/winter-project-colorlight-5a-75b-protocol/
 2. https://github.com/haraldkubota/colorlight
 3. https://github.com/asamonik/colorlight.rs
 4. PanelPlayer `colorlight.c`: https://github.com/ivancmz/PanelPlayer (fork of the original PanelPlayer)
+5. FPP ColorLight output, the only reference here that handles **V13.x firmware**: `src/channeloutput/ColorLight-5a-75.{cpp,h}` in https://github.com/FalconChristmas/fpp (fix in commit `d49ad41`, discussion in https://github.com/FalconChristmas/fpp/issues/1849). It also ships a Wireshark dissector, `docs/ColorLight_Wireshark.lua`, useful for checking our own packets. FPP is GPL-2.0: take protocol facts from it, never copy code.
 
 Record the confirmed layouts in `crates/colorlight-proto/PROTOCOL.md` with links, and add unit tests that encode known-good packets (from captures or reference implementations) byte-for-byte.
 
 ### 4.2 Card configuration prerequisites
 - Panel size, scan type, chaining order etc. are configured **on the card** with Colorlight's LEDVision (Windows) once. The daemon only sends pixels.
-- Firmware: users report FPP/raw-sender problems with V13.x firmware that went away after downgrading to 11.04. Note the firmware version in deploy docs and expose it via detection if the protocol allows.
+- Firmware: V13.x broke raw senders that worked on 11.04 and older. FPP fixed it (reference 5) as follows. **The packet layouts are confirmed in `crates/colorlight-proto/PROTOCOL.md` (with sources). The V13 behaviour itself (the doubling and the version cut-off) rests on FPP alone; no other reference knows about V13:**
+  - Discover receivers at startup with a `0x07` packet. Each card answers with `0x08`, which carries the firmware major/minor version and the card's configured width/height. The request carries a receiver index (0, 1, ...); ask for 0, then 1, and so on until nobody answers. colorlight.rs's "ack" is just the request for index 1.
+  - Per frame: brightness (`0x0A`), then the `0x55` row packets, then a short gap (FPP default 500 µs), then the `0x01` display/sync packet.
+  - On firmware **≥ 13**, send `0x01` (and `0x0A`) **twice**, back to back. Older firmware flickers if it gets two, so the count must follow the detected version.
+  - `colorlight-proto::needs_double_sync(major)` is the rule (major >= 13).
+- Mixing old and new firmware on one chain is not supported, by FPP or by us.
+- What we do: `probe` prints each card's firmware version and configured size. `ColorlightSink` discovers cards on startup and picks the sync count from the highest firmware major found. An optional `firmware_major` override on the output wins over discovery (and is used when nothing answers; with neither, the sink warns and assumes firmware < 13). It warns if cards on one interface disagree, or if a card's reported size differs from the canvas. That last check is a warning only, because the reported size need not equal the canvas (two panels on two ports) and FPP calls the field unreliable.
+- Per-frame order as implemented (`colorlight_sink::FrameSender`): `0x0A` (x2 on >= 13), all `0x55` rows with card offset 0, `sync_gap_us` pause, `0x01` (x2 on >= 13). Both brightness frames carry `card_brightness()`. If the rows fail to send, the `0x01` is skipped so the card keeps its last complete frame. Colour order is applied after the LUT, in place, via the output's `color_order`.
+- Errors: a failed frame is counted and logged at most every 5 s; the sink keeps running and re-opens the socket with backoff (1 s up to 10 s) after a fatal error or three failures in a row. The rest of the daemon is unaffected.
+- Deploy docs still recommend a known-good firmware (11.04 for this build). Supporting 13.x is still worth doing, because some panel types reportedly refresh better on 13.x (see the FPP issue).
 
 ### 4.3 Transport (`colorlight-net`)
-- Linux `AF_PACKET` raw socket bound to a configured interface (e.g. `eth1`). Use `socket2` or `pnet_datalink`; prefer minimal deps.
+- Linux `AF_PACKET` raw socket bound to a configured interface (e.g. `eth1`). **Implemented with `libc` directly** (`socket`, `bind`, `sendmmsg`, `poll`, `recv`), not `socket2`/`pnet_datalink`: `libc` is already in the tree through tokio and the calls we need are five. The socket is bound to EtherType `0x0805` so that it only receives discovery replies (the card answers broadcast); sending is not affected by that filter.
+- The `Link` trait (`send(&[&[u8]])`, `recv(buf, timeout)`, `pause`) is what the sink and `discover()` are written against; `colorlight_net::mock::MockLink` replays captured frames in tests, so no test needs root or a NIC.
 - Requires `CAP_NET_RAW`. Run via systemd `AmbientCapabilities=CAP_NET_RAW`. No full root.
-- Batch sends per frame. Measure: a full frame for 2× 172×86 (172×172, ~89 KB of BGR) is small, but 4+ panels at 60 fps should still be well inside Gigabit. Keep a per-frame send-time metric.
+- Batch sends per frame. Measure: a full frame for 2× 172×86 (172×172, ~89 KB of pixel data) is small, but 4+ panels at 60 fps should still be well inside Gigabit. Keep a per-frame send-time metric.
 - Gate behind `cfg(target_os = "linux")`. On macOS/Windows the crate compiles to a stub that errors at runtime, so devs can still build the daemon and use the preview sink.
 
 ### 4.4 Multiple panels / cards
@@ -134,9 +145,10 @@ Record the confirmed layouts in `crates/colorlight-proto/PROTOCOL.md` with links
 
 ### 5.2 Post-processing
 Applied per sink (so the preview can show "true" colours while the panel gets corrected output):
-- Gamma LUT (configurable, default ~2.2)
-- Colour temperature / RGB scaling
-- Global brightness (prefer the card's hardware brightness in the latch frame where possible, software scaling as fallback)
+- Gamma LUT (configurable, default 2.2)
+- Colour temperature / RGB scaling, configured as a white point colour
+- Global brightness (`brightness_mode = "hardware"` puts it in the card's display frame; `"software"` folds it into the LUT)
+- All of the above are combined into one 256-entry LUT per channel (`postprocess.rs`; order: gamma, white point, brightness, one rounding)
 - Auto-dim: schedule-based (sunset/sunrise, quiet hours) or driven by a HA lux sensor entity
 
 ### 5.3 Data store
@@ -229,13 +241,19 @@ fps = 30
 
 [[output]]
 type = "colorlight"
-interface = "eth1"
-gamma = 2.2
-brightness = 180
-  [[output.region]]          # one card, two panels stacked
-  canvas = { x = 0, y = 0, w = 172, h = 172 }
-  card_offset = { x = 0, y = 0 }
-  rotate = 0
+interface = "eth1"           # required; at most one output per interface
+gamma = 2.2                  # 1.0..=4.0
+brightness = 180             # 0..=255
+white_point = "#ffd8b0"      # colour temperature as the colour of full white (default #ffffff)
+brightness_mode = "hardware" # "hardware": in the card's display frame; "software": in the colour LUT
+# firmware_major = 11        # optional override if card discovery fails (§4.2)
+color_order = "rgb"          # wire byte order: rgb, rbg, grb, gbr, brg, bgr (PROTOCOL.md "Pixel byte order")
+sync_gap_us = 500            # 0..=20000: gap between the last row packet and the display frame
+# M1: one output maps the whole canvas to card origin (0,0). Regions come in M6:
+#   [[output.region]]        # one card, two panels stacked
+#   canvas = { x = 0, y = 0, w = 172, h = 172 }
+#   card_offset = { x = 0, y = 0 }
+#   rotate = 0
 
 [[output]]
 type = "preview"
@@ -339,13 +357,15 @@ Logging: `tracing` with env-filter; JSON output option for journald.
 ## 13. CLI
 - `paneld run --config path`: main daemon
 - `paneld check --config path`: validate config and exit
-- `paneld probe --interface eth1`: detect card(s), print info, needs CAP_NET_RAW
-- `paneld test-pattern --interface eth1 --width W --height H`: colour bars / gradient / per-panel ID numbers, for bring-up
+- `paneld probe --interface eth1 [--timeout-ms 500]`: detect card(s), print index, model, firmware, reported size and whether double sync is needed; exits non-zero if none answer. Needs CAP_NET_RAW.
+- `paneld test-pattern --width W --height H [--out png] [--interface eth1]`: colour bars / gradient / panel IDs / grid / solid / walk, for bring-up. With `--interface` it sends continuously at `--fps` (default 30) until Ctrl-C, using the same sink as `run`, with `--brightness` (default 64), `--gamma` (default 1.0), `--color-order`, `--firmware-major` and `--sync-gap-us`.
 - `paneld render --config path --scene home --out frame.png`: offline render of one scene (uses golden-test path)
 
 ---
 
 ## 14. Milestones
+CI (GitHub Actions: fmt, clippy, tests, an aarch64 check for the Pi, a macOS check for the non-Linux stub, and MSRV) was brought forward from M5 Ops to the middle of M1, so every later phase lands on a green build.
+
 1. **M0 Skeleton**: workspace, config parsing, canvas, render loop, preview sink, `clock` + `text` widgets, `paneld render`. Runs on a laptop.
 2. **M1 Hardware**: `colorlight-proto` (with PROTOCOL.md + tests), `colorlight-net`, `probe`, `test-pattern`, ColorlightSink, gamma/brightness. Two panels lit on the Pi.
 3. **M2 Scenes**: zones, playlist rotation, conditions, `value`/`image`/`sparkline` widgets, hot reload.
@@ -361,7 +381,9 @@ Each milestone ends with: tests green, `cargo clippy -- -D warnings` clean, READ
 
 ## 15. Open questions
 - ~~Exact panel resolution and scan rate~~ **Answered:** 172×86, 1/43 scan (86 rows / 2 = 43 scan lines, the usual two-halves HUB75 layout). Needed for the LEDVision settings in `deploy/README.md`.
-- Card firmware version currently installed.
+- **Still open for the user (needs the hardware, see `deploy/README.md`):** the card's firmware version (plan: flash V11.x, 11.04 if available; the sink detects the version either way, §4.2); which HUB75 port each panel is on and what LEDVision needs for the right order; the panels' colour order.
+- Card firmware version currently installed. Plan: flash V11.x (11.04 if available). Either way the sink detects the version (§4.2).
 - ~~Side-by-side or stacked~~ **Answered:** stacked vertically, canvas 172×172.
+- Pixel byte order of the actual panels (RGB or BGR). The protocol doesn't say; confirm with the M1 `test-pattern`, then set the output's colour order.
 - Which HUB75 port(s) each panel is on and how the card maps them (sets `card_offset` in the M1 output map). Confirm in LEDVision.
 - Which HA entities and external APIs to show first (drives M3 priorities).
