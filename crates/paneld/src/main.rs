@@ -14,7 +14,6 @@ use paneld::config::{
     MIN_GAMMA,
 };
 use paneld::engine::{frame_channel, RenderLoop};
-use paneld::scene::Scene;
 use paneld::store::Store;
 use paneld::test_pattern::{self, Pattern};
 use paneld::widgets::FrameCtx;
@@ -36,7 +35,7 @@ enum Cmd {
     Run {
         #[arg(long)]
         config: PathBuf,
-        /// Scene to show. Default: the first one. (Rotation arrives in M2.)
+        /// Show only this scene. Default: rotate through all scenes.
         #[arg(long)]
         scene: Option<String>,
     },
@@ -368,24 +367,10 @@ fn main() -> anyhow::Result<()> {
 
 fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
     let cfg = Config::load(&config_path)?;
-    let scene_cfg = match &scene {
-        Some(name) => cfg
-            .scene(name)
-            .with_context(|| format!("no scene named {name:?}"))?,
-        None => &cfg.scenes[0],
-    };
-
-    let store = Store::new();
     let (tx, rx) = frame_channel(cfg.canvas.width, cfg.canvas.height);
-    let render = RenderLoop {
-        width: cfg.canvas.width,
-        height: cfg.canvas.height,
-        fps: cfg.canvas.fps,
-        scene: Scene::from_config(scene_cfg),
-        store,
-    }
-    .spawn(tx)
-    .context("starting render thread")?;
+    let render = RenderLoop::from_config(&cfg, scene.as_deref(), Store::new())?
+        .spawn(tx)
+        .context("starting render thread")?;
 
     let sinks: Vec<_> = cfg
         .outputs

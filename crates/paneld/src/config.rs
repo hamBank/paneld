@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::Context;
 use chrono::format::{Item, StrftimeItems};
@@ -14,6 +15,7 @@ use serde::Deserialize;
 
 use crate::canvas::Rect;
 use crate::color::Color;
+use crate::condition::Condition;
 use crate::fonts;
 
 pub const MAX_FPS: u32 = 60;
@@ -21,6 +23,9 @@ pub const MAX_PREVIEW_SCALE: u32 = 32;
 pub const MIN_GAMMA: f32 = 1.0;
 pub const MAX_GAMMA: f32 = 4.0;
 pub const MAX_SYNC_GAP_US: u32 = 20_000;
+/// Upper bound for scene durations, in seconds (one day).
+pub const MAX_DURATION_S: f64 = 86_400.0;
+pub const DEFAULT_SCENE_DURATION_S: f64 = 10.0;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -30,8 +35,49 @@ pub struct Config {
     pub outputs: Vec<OutputConfig>,
     #[serde(default)]
     pub http: HttpConfig,
+    #[serde(default)]
+    pub playlist: PlaylistConfig,
     #[serde(default, rename = "scene")]
     pub scenes: Vec<SceneConfig>,
+}
+
+/// Playlist-wide settings (DESIGN.md §5.5).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlaylistConfig {
+    /// How long a scene is shown when it has no `duration_s` of its own.
+    /// Valid: finite, > 0, at most 86400.
+    #[serde(default = "default_scene_duration_s")]
+    pub default_duration_s: f64,
+}
+
+impl Default for PlaylistConfig {
+    fn default() -> Self {
+        PlaylistConfig {
+            default_duration_s: default_scene_duration_s(),
+        }
+    }
+}
+
+impl PlaylistConfig {
+    pub fn default_duration(&self) -> Duration {
+        seconds(self.default_duration_s)
+    }
+}
+
+fn default_scene_duration_s() -> f64 {
+    DEFAULT_SCENE_DURATION_S
+}
+
+/// Seconds to a `Duration`. Only for values that passed validation; anything
+/// else is clamped to `0..=MAX_DURATION_S` rather than panicking.
+pub fn seconds(s: f64) -> Duration {
+    let s = if s.is_finite() { s } else { 0.0 };
+    Duration::from_secs_f64(s.clamp(0.0, MAX_DURATION_S))
+}
+
+fn valid_duration(s: f64) -> bool {
+    s.is_finite() && s > 0.0 && s <= MAX_DURATION_S
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -229,6 +275,14 @@ fn default_bind() -> SocketAddr {
 #[serde(deny_unknown_fields)]
 pub struct SceneConfig {
     pub name: String,
+    /// Seconds this scene stays on screen per turn. Default:
+    /// `[playlist] default_duration_s`.
+    #[serde(default)]
+    pub duration_s: Option<f64>,
+    /// Only show this scene while the expression is true, e.g.
+    /// `"prom:house_power > 0"`. See `condition.rs` for the grammar.
+    #[serde(default)]
+    pub condition: Option<String>,
     #[serde(default, rename = "zone")]
     pub zones: Vec<ZoneConfig>,
 }
@@ -403,6 +457,13 @@ impl Config {
             errs.push("output: at most one preview output is allowed".into());
         }
 
+        if !valid_duration(self.playlist.default_duration_s) {
+            errs.push(format!(
+                "playlist.default_duration_s: must be > 0 and at most {MAX_DURATION_S} (got {})",
+                self.playlist.default_duration_s
+            ));
+        }
+
         if self.scenes.is_empty() {
             errs.push("at least one [[scene]] is required".into());
         }
@@ -412,6 +473,22 @@ impl Config {
                 errs.push("scene: name must not be empty".into());
             } else if !names.insert(s.name.as_str()) {
                 errs.push(format!("scene {:?}: duplicate scene name", s.name));
+            }
+            if let Some(d) = s.duration_s {
+                if !valid_duration(d) {
+                    errs.push(format!(
+                        "scene {:?}: duration_s must be > 0 and at most {MAX_DURATION_S} (got {d})",
+                        s.name
+                    ));
+                }
+            }
+            if let Some(cond) = &s.condition {
+                if let Err(e) = Condition::parse(cond) {
+                    errs.push(format!(
+                        "scene {:?}: invalid condition {cond:?}: {e}",
+                        s.name
+                    ));
+                }
             }
             for (i, z) in s.zones.iter().enumerate() {
                 let at = format!("scene {:?} zone[{i}]", s.name);

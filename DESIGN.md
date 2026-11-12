@@ -173,6 +173,7 @@ Applied per sink (so the preview can show "true" colours while the panel gets co
 ### 5.5 Scheduler
 - **Playlist**: ordered scenes with durations. Conditional scenes are skipped when their condition is false.
 - **Notifications**: priority queue. Each notification has priority, duration, optional repeat count, and either a scene ref or inline content (text/icon/colour). Higher priority interrupts the current one, then the playlist resumes **where it left off**.
+- As built in M2 (`scheduler.rs`, `condition.rs`): the scheduler is pure state driven by `tick(now: Instant, &StoreSnapshot)`, so tests inject time. It makes at most one switch per tick (a stalled render loop doesn't fast-forward the playlist), leaves a scene at once if its condition turns false, and returns `None` (black frame, logged once per transition) when nothing is eligible. Conditions are `key op literal`, bare `key` (truthy), `!`, `&&`, `||` and parentheses; a missing key or type mismatch makes a comparison false. `[playlist] default_duration_s` (default 10) is an addition to the §8 schema. `paneld run --scene X` plays a playlist of one.
 - Manual override: pin a scene until released (via MQTT select / HTTP).
 - Transitions: none / cut first; slide/fade later.
 
@@ -285,6 +286,9 @@ type = "http_poll"
 url = "https://example/api/forecast"
 interval_s = 600
 extract = { "weather:temp" = "$.current.temp", "weather:icon" = "$.current.icon" }
+
+[playlist]
+default_duration_s = 10   # used by scenes without duration_s; > 0, at most 86400
 
 [[scene]]
 name = "home"

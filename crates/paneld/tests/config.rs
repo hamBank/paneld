@@ -271,3 +271,39 @@ fn colorlight_rejects_duplicate_interface() {
     );
     assert!(!e.contains("output[1]"), "{e}");
 }
+
+#[test]
+fn playlist_defaults_and_scene_fields_parse() {
+    let cfg = Config::parse(&format!(
+        "{MINIMAL}duration_s = 20\ncondition = \"prom:house_power > 0 && !ha:away\"\n[[scene]]\nname = \"b\"\n"
+    ))
+    .unwrap();
+    assert_eq!(cfg.playlist.default_duration_s, 10.0);
+    assert_eq!(cfg.scenes[0].duration_s, Some(20.0));
+    assert!(cfg.scenes[0].condition.is_some());
+    assert_eq!(cfg.scenes[1].duration_s, None);
+    assert_eq!(cfg.scenes[1].condition, None);
+
+    let cfg = Config::parse(&format!("[playlist]\ndefault_duration_s = 2.5\n{MINIMAL}")).unwrap();
+    assert_eq!(cfg.playlist.default_duration_s, 2.5);
+}
+
+#[test]
+fn rejects_bad_durations_and_conditions() {
+    let e = err(&format!(
+        "[playlist]\ndefault_duration_s = 0\n{MINIMAL}duration_s = -3\n\
+         [[scene]]\nname = \"b\"\nduration_s = 1e300\n\
+         [[scene]]\nname = \"c\"\ncondition = \"prom:x >\"\n\
+         [[scene]]\nname = \"d\"\ncondition = \"temp > 1\"\n"
+    ));
+    for want in [
+        "playlist.default_duration_s: must be > 0 and at most 86400 (got 0)",
+        r#"scene "a": duration_s must be > 0 and at most 86400 (got -3)"#,
+        r#"scene "b": duration_s must be > 0 and at most 86400"#,
+        r#"scene "c": invalid condition "prom:x >": unexpected end of expression"#,
+        r#"scene "d": invalid condition "temp > 1": `temp` is not a valid key"#,
+    ] {
+        assert!(e.contains(want), "missing {want:?} in:\n{e}");
+    }
+    assert!(err(&format!("[playlist]\nspeed = 1\n{MINIMAL}")).contains("unknown field"));
+}
