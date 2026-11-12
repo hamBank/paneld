@@ -7,7 +7,7 @@ use chrono::{DateTime, Local};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use paneld::config::Config;
+use paneld::config::{Config, OutputConfig};
 use paneld::engine::{frame_channel, RenderLoop};
 use paneld::scene::Scene;
 use paneld::store::Store;
@@ -115,6 +115,15 @@ fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
             .with_context(|| format!("no scene named {name:?}"))?,
         None => &cfg.scenes[0],
     };
+
+    for o in &cfg.outputs {
+        if let OutputConfig::Colorlight(cl) = o {
+            tracing::warn!(
+                "colorlight output on {} not implemented yet, ignoring",
+                cl.interface
+            );
+        }
+    }
 
     let store = Store::new();
     let (tx, rx) = frame_channel(cfg.canvas.width, cfg.canvas.height);

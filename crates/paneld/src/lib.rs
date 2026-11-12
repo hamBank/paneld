@@ -11,6 +11,7 @@ pub mod config;
 pub mod engine;
 pub mod fonts;
 pub mod png_io;
+pub mod postprocess;
 pub mod preview;
 pub mod render;
 pub mod scene;
