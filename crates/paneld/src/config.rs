@@ -17,6 +17,8 @@ use crate::canvas::Rect;
 use crate::color::Color;
 use crate::condition::Condition;
 use crate::fonts;
+use crate::format::NumberFormat;
+use crate::icons;
 
 pub const MAX_FPS: u32 = 60;
 pub const MAX_PREVIEW_SCALE: u32 = 32;
@@ -302,6 +304,8 @@ pub struct ZoneConfig {
 pub enum WidgetConfig {
     Clock(ClockConfig),
     Text(TextConfig),
+    Value(ValueConfig),
+    Sparkline(SparklineConfig),
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -345,6 +349,82 @@ pub struct TextConfig {
     /// Scroll right-to-left at this many pixels per second. Unset = static.
     #[serde(default)]
     pub scroll_px_per_s: Option<f32>,
+}
+
+/// A number from the store, formatted, with optional icon and threshold
+/// colours. Shows `--` when the value is missing, stale or not a number.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValueConfig {
+    /// Store key, e.g. `ha:sensor.outside_temperature`.
+    pub key: String,
+    /// One placeholder: `{}`, `{:.N}`, `{:>W.N}` or `{:<W.N}` (see `format.rs`).
+    #[serde(default = "default_value_format")]
+    pub format: String,
+    /// Appended verbatim after the formatted number. The unit stored with
+    /// the value is ignored. Default: none.
+    #[serde(default)]
+    pub unit: Option<String>,
+    #[serde(default = "default_font")]
+    pub font: String,
+    /// Colour below every threshold (and above, when `thresholds` is empty).
+    #[serde(default = "default_color")]
+    pub color: Color,
+    /// Aligns icon and text together within the zone.
+    #[serde(default)]
+    pub align: Align,
+    /// Built-in icon drawn left of the text in the text colour.
+    #[serde(default)]
+    pub icon: Option<String>,
+    /// Colour bands: the value uses the colour of the highest `above` it is
+    /// strictly greater than. Any order; `above` values must be unique.
+    #[serde(default)]
+    pub thresholds: Vec<ThresholdConfig>,
+    /// Show the placeholder when the value is older than this. Default: never.
+    #[serde(default)]
+    pub stale_after_s: Option<f64>,
+}
+
+fn default_value_format() -> String {
+    "{}".into()
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThresholdConfig {
+    pub above: f64,
+    pub color: Color,
+}
+
+/// A line graph of a `Series` value, newest point on the right.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SparklineConfig {
+    pub key: String,
+    #[serde(default = "default_color")]
+    pub color: Color,
+    /// `true` fills under the line with a dim version of `color`; a colour
+    /// fills with that colour. Default: no fill.
+    #[serde(default)]
+    pub fill: Option<Fill>,
+    /// Fixed lower end of the scale. Default: from the data.
+    #[serde(default)]
+    pub min: Option<f64>,
+    /// Fixed upper end of the scale. Default: from the data.
+    #[serde(default)]
+    pub max: Option<f64>,
+    /// How many of the most recent points to show (at least 2). Default: the
+    /// zone width, i.e. one point per pixel column.
+    #[serde(default)]
+    pub points: Option<u32>,
+}
+
+/// `fill = true`, `fill = false` or `fill = "#rrggbb"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum Fill {
+    Enabled(bool),
+    Color(Color),
 }
 
 fn default_font() -> String {
@@ -513,8 +593,81 @@ impl Config {
     }
 }
 
+fn validate_value(v: &ValueConfig, at: &str, errs: &mut Vec<String>) {
+    if v.key.trim().is_empty() {
+        errs.push(format!("{at} value: key must not be empty"));
+    }
+    if let Err(e) = NumberFormat::parse(&v.format) {
+        errs.push(format!("{at} value: {e}"));
+    }
+    if let Some(icon) = &v.icon {
+        if icons::lookup(icon).is_none() {
+            errs.push(format!(
+                "{at} value: unknown icon {icon:?} (known: {})",
+                icons::known_names()
+            ));
+        }
+    }
+    let mut seen: Vec<f64> = Vec::new();
+    for (i, t) in v.thresholds.iter().enumerate() {
+        if !t.above.is_finite() {
+            errs.push(format!(
+                "{at} value: thresholds[{i}].above must be a finite number (got {})",
+                t.above
+            ));
+        } else if seen.contains(&t.above) {
+            errs.push(format!(
+                "{at} value: thresholds[{i}].above = {} is a duplicate",
+                t.above
+            ));
+        } else {
+            seen.push(t.above);
+        }
+    }
+    if let Some(s) = v.stale_after_s {
+        if !(s.is_finite() && s > 0.0) {
+            errs.push(format!("{at} value: stale_after_s must be > 0 (got {s})"));
+        }
+    }
+}
+
+fn validate_sparkline(s: &SparklineConfig, at: &str, errs: &mut Vec<String>) {
+    if s.key.trim().is_empty() {
+        errs.push(format!("{at} sparkline: key must not be empty"));
+    }
+    for (name, v) in [("min", s.min), ("max", s.max)] {
+        if let Some(v) = v.filter(|v| !v.is_finite()) {
+            errs.push(format!(
+                "{at} sparkline: {name} must be a finite number (got {v})"
+            ));
+        }
+    }
+    if let (Some(lo), Some(hi)) = (s.min, s.max) {
+        if lo.is_finite() && hi.is_finite() && lo >= hi {
+            errs.push(format!(
+                "{at} sparkline: min must be less than max (got min = {lo}, max = {hi})"
+            ));
+        }
+    }
+    if let Some(p) = s.points {
+        if p < 2 {
+            errs.push(format!(
+                "{at} sparkline: points must be at least 2 (got {p})"
+            ));
+        }
+    }
+}
+
 fn validate_widget(w: &WidgetConfig, at: &str, errs: &mut Vec<String>) {
     let font = match w {
+        WidgetConfig::Sparkline(s) => {
+            validate_sparkline(s, at, errs);
+            return;
+        }
+        WidgetConfig::Value(v) => {
+            validate_value(v, at, errs);
+            &v.font
+        }
         WidgetConfig::Clock(c) => {
             if c.format.is_empty() {
                 errs.push(format!("{at} clock: format must not be empty"));

@@ -1,5 +1,5 @@
 # paneld example config. See DESIGN.md §8 for the full planned schema;
-# only what the current milestone (M2) implements is accepted here.
+# only what the current milestone implements is accepted here.
 
 [canvas]
 width = 172        # two 172x86 panels (1/43 scan) stacked vertically
@@ -47,9 +47,15 @@ duration_s = 20           # seconds on screen per turn
   rect = { x = 0, y = 86, w = 172, h = 43 }
   background = "#101030"
   widget = { type = "text", text = "Hello from paneld", font = "9x15", scroll_px_per_s = 30 }
+  # Data sources arrive in M3. Until a source writes these keys the widgets
+  # show a dim "--" (value) or nothing (sparkline).
   [[scene.zone]]
-  rect = { x = 0, y = 129, w = 172, h = 43 }
-  widget = { type = "text", text = "21.5°C", font = "10x20", color = "#00ff80" }
+  rect = { x = 0, y = 129, w = 172, h = 21 }
+  widget = { type = "value", key = "ha:sensor.outside_temperature", format = "{:.1}", unit = "°C", icon = "thermometer", font = "9x15", color = "#40a0ff", align = "center", stale_after_s = 900, thresholds = [
+    { above = 20.0, color = "#00ff80" }, { above = 28.0, color = "#ff4000" } ] }
+  [[scene.zone]]
+  rect = { x = 0, y = 150, w = 172, h = 22 }
+  widget = { type = "sparkline", key = "prom:house_power_series", color = "#ffaa00", fill = true, points = 120 }
 
 # Shown only while the condition holds; otherwise skipped (and left at once if
 # it turns false mid-display). A missing key or a type mismatch counts as false.
