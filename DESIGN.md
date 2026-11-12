@@ -103,12 +103,19 @@ The 5A-75B takes **raw Ethernet frames** (not IP) on its Gigabit port. Known sha
 2. https://github.com/haraldkubota/colorlight
 3. https://github.com/asamonik/colorlight.rs
 4. PanelPlayer `colorlight.c`: https://github.com/ivancmz/PanelPlayer (fork of the original PanelPlayer)
+5. FPP ColorLight output, the only reference here that handles **V13.x firmware**: `src/channeloutput/ColorLight-5a-75.{cpp,h}` in https://github.com/FalconChristmas/fpp (fix in commit `d49ad41`, discussion in https://github.com/FalconChristmas/fpp/issues/1849). It also ships a Wireshark dissector, `docs/ColorLight_Wireshark.lua`, useful for checking our own packets. FPP is GPL-2.0: take protocol facts from it, never copy code.
 
 Record the confirmed layouts in `crates/colorlight-proto/PROTOCOL.md` with links, and add unit tests that encode known-good packets (from captures or reference implementations) byte-for-byte.
 
 ### 4.2 Card configuration prerequisites
 - Panel size, scan type, chaining order etc. are configured **on the card** with Colorlight's LEDVision (Windows) once. The daemon only sends pixels.
-- Firmware: users report FPP/raw-sender problems with V13.x firmware that went away after downgrading to 11.04. Note the firmware version in deploy docs and expose it via detection if the protocol allows.
+- Firmware: V13.x broke raw senders that worked on 11.04 and older. FPP fixed it (reference 5) as follows. **To be confirmed against the source and captures before M1 code is written:**
+  - Discover receivers at startup with a `0x07` packet. Each card answers with `0x08`, which carries the firmware major/minor version and the card's configured width/height.
+  - Per frame: brightness (`0x0A`), then the `0x55` row packets, then a short gap (FPP default 500 µs), then the `0x01` display/sync packet.
+  - On firmware **≥ 13**, send `0x01` (and `0x0A`) **twice**, back to back. Older firmware flickers if it gets two, so the count must follow the detected version.
+  - Mixing old and new firmware on one chain is not supported, by FPP or by us.
+- What we do: `probe` prints each card's firmware version and configured size. `ColorlightSink` discovers cards on startup and picks the sync count from the result. An optional `firmware_major` override on the output covers cards that don't answer discovery. Log a warning if cards on one interface disagree, or if the card's reported size doesn't match the configured regions.
+- Deploy docs still recommend a known-good firmware (11.04 for this build). Supporting 13.x is still worth doing, because some panel types reportedly refresh better on 13.x (see the FPP issue).
 
 ### 4.3 Transport (`colorlight-net`)
 - Linux `AF_PACKET` raw socket bound to a configured interface (e.g. `eth1`). Use `socket2` or `pnet_datalink`; prefer minimal deps.
@@ -361,7 +368,7 @@ Each milestone ends with: tests green, `cargo clippy -- -D warnings` clean, READ
 
 ## 15. Open questions
 - ~~Exact panel resolution and scan rate~~ **Answered:** 172×86, 1/43 scan (86 rows / 2 = 43 scan lines, the usual two-halves HUB75 layout). Needed for the LEDVision settings in `deploy/README.md`.
-- Card firmware version currently installed.
+- Card firmware version currently installed. Plan: flash V11.x (11.04 if available). Either way the sink detects the version (§4.2).
 - ~~Side-by-side or stacked~~ **Answered:** stacked vertically, canvas 172×172.
 - Which HUB75 port(s) each panel is on and how the card maps them (sets `card_offset` in the M1 output map). Confirm in LEDVision.
 - Which HA entities and external APIs to show first (drives M3 priorities).
