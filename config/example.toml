@@ -1,5 +1,5 @@
 # paneld example config. See DESIGN.md §8 for the full planned schema;
-# only what the current milestone (M1) implements is accepted here.
+# only what the current milestone (M2) implements is accepted here.
 
 [canvas]
 width = 172        # two 172x86 panels (1/43 scan) stacked vertically
@@ -28,8 +28,13 @@ grid = true
 [http]
 bind = "127.0.0.1:8080"
 
+# Scenes rotate in the order listed below.
+[playlist]
+default_duration_s = 10   # for scenes without their own duration_s; > 0, max 86400
+
 [[scene]]
 name = "home"
+duration_s = 20           # seconds on screen per turn
   # Top panel: y 0..86
   [[scene.zone]]
   rect = { x = 0, y = 0, w = 172, h = 60 }
@@ -46,8 +51,14 @@ name = "home"
   rect = { x = 0, y = 129, w = 172, h = 43 }
   widget = { type = "text", text = "21.5°C", font = "10x20", color = "#00ff80" }
 
+# Shown only while the condition holds; otherwise skipped (and left at once if
+# it turns false mid-display). A missing key or a type mismatch counts as false.
+# Syntax: `key op literal` with > >= < <= == !=, bare `key` for truthy, plus
+# ! && || and parentheses, e.g. "prom:house_power > 0 && !ha:binary_sensor.away".
 [[scene]]
 name = "banner"
+duration_s = 5
+condition = "prom:house_power > 0"
   [[scene.zone]]
   rect = { x = 0, y = 0, w = 172, h = 172 }
   widget = { type = "text", text = "paneld", font = "10x20", color = "#00ff80" }

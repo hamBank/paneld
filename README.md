@@ -10,7 +10,7 @@ Architecture, config schema and roadmap are in [`DESIGN.md`](DESIGN.md).
 
 **M1 (hardware) is code-complete, but untested on a real card.** It adds `colorlight-proto` (packet encoding), `colorlight-net` (Linux raw-socket transport, discovery), the Colorlight sink behind `[[output]] type = "colorlight"`, `paneld probe` and `paneld test-pattern --interface`. Bring-up on the Pi follows [`deploy/README.md`](deploy/README.md); the result (firmware version, port mapping, colour order) is still to be recorded, see `DESIGN.md` §15. The sink only works on Linux; other platforms build a stub.
 
-Not built yet: scene rotation and more widgets (M2), data sources (M3), control API and MQTT (M4). See `DESIGN.md` §14.
+Scene rotation and conditions (M2) are in; more widgets are still to come (M2), data sources (M3), control API and MQTT (M4). See `DESIGN.md` §14.
 
 ## Hardware
 
@@ -47,7 +47,7 @@ paneld test-pattern --width 172 --height 172 --panel-height 86 --pattern panel-i
 
 `render` also takes `--time <RFC 3339>` and `--elapsed <seconds>` for reproducible output.
 
-## Config (M1)
+## Config (M2)
 
 See [`config/example.toml`](config/example.toml). Unknown keys are rejected, and validation reports every problem at once.
 
@@ -57,7 +57,8 @@ See [`config/example.toml`](config/example.toml). Unknown keys are rejected, and
 | `[[output]]` | `type = "preview"`, `scale` (1–32, default 8), `grid` (default false) |
 | `[[output]]` | `type = "colorlight"`, `interface` (required), `gamma` (1.0–4.0, default 2.2), `brightness` (0–255, default 255), `white_point` (`#rrggbb`, default `#ffffff`), `brightness_mode` (`hardware` default, or `software`), `color_order` (`rgb` default, `rbg`, `grb`, `gbr`, `brg`, `bgr`: what the three wire bytes carry; the right value depends on the panel), `firmware_major` (optional override if discovery fails), `sync_gap_us` (0–20000, default 500). One output per interface. The whole canvas goes to card origin (0,0); multi-region maps come in M6. |
 | `[http]` | `bind` (default `127.0.0.1:8080`) |
-| `[[scene]]` | `name`, `[[scene.zone]]` with `rect = { x, y, w, h }`, `widget`, optional `background = "#rrggbb"` |
+| `[playlist]` | `default_duration_s` (> 0, at most 86400, default 10): how long a scene is shown when it has no `duration_s` |
+| `[[scene]]` | `name`, `duration_s` (optional, same range), `condition` (optional, see below), `[[scene.zone]]` with `rect = { x, y, w, h }`, `widget`, optional `background = "#rrggbb"` |
 
 Widgets:
 - `clock`: `format` (strftime, default `%H:%M`), `font`, `color`, `align`
@@ -65,7 +66,18 @@ Widgets:
 
 Fonts: `4x6`, `5x7`, `5x8`, `6x9`, `6x10` (default), `6x12`, `6x13`, `7x13`, `7x14`, `8x13`, `9x15`, `9x18`, `10x20`, plus `_bold` variants of most. All are ISO-8859-1, so `°` works.
 
-`run` shows `--scene` or the first scene. Rotation arrives in M2.
+### Playlist and conditions
+
+`run` rotates through the scenes in config order, each for its `duration_s`, skipping scenes whose `condition` is false. Scene changes are logged at info level. `run --scene NAME` shows only that scene (its condition still applies). If no scene is eligible the panel goes black, and that is logged once per transition. A scene whose condition turns false while it is on screen is left immediately. If the render loop stalls, the playlist moves at most one scene per frame and never catches up on missed time. `render --scene NAME` is unchanged: one frame of one scene, conditions ignored.
+
+A `condition` is a small expression over store keys:
+- Comparison: `key op literal` with `>`, `>=`, `<`, `<=`, `==`, `!=`; literals are numbers, `true`/`false` and quoted strings (`"..."` or `'...'`).
+- A bare `key` is truthy when it is `true`, a non-zero number or a non-empty string.
+- `!`, `&&`, `||` (`&&` binds tighter) and parentheses.
+- Keys are `source:name`, e.g. `ha:sensor.outside_temp`, `prom:house_power`, `weather:temp`.
+- A missing key, or a comparison between mismatched types (text vs number, ...), is **false** for every operator, `!=` included. So `!(ha:x > 5)` is true while `ha:x` is missing.
+
+Conditions are parsed when the config loads; errors name the scene and the expression.
 
 ## Development
 
