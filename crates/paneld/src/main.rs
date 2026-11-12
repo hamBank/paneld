@@ -4,13 +4,15 @@ use std::time::Duration;
 use anyhow::Context;
 use axum::Router;
 use chrono::{DateTime, Local};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
 
+use paneld::color::Color;
 use paneld::config::Config;
 use paneld::engine::{frame_channel, RenderLoop};
 use paneld::scene::Scene;
 use paneld::store::Store;
+use paneld::test_pattern::{self, Pattern};
 use paneld::widgets::FrameCtx;
 use paneld::{png_io, preview, render};
 
@@ -57,6 +59,87 @@ enum Cmd {
         #[arg(long, default_value_t = 1)]
         scale: u32,
     },
+    /// Render a hardware bring-up test pattern.
+    TestPattern(TestPatternArgs),
+}
+
+/// Test pattern names for `--pattern`.
+#[derive(Clone, Copy, ValueEnum)]
+enum PatternArg {
+    Bars,
+    Gradient,
+    PanelIds,
+    Grid,
+    Solid,
+    Walk,
+}
+
+/// Arguments of `test-pattern`.
+///
+/// TODO(M1 sink work): add `--interface <nic>` to send the pattern to the
+/// Colorlight card (DESIGN.md section 13) and make `--out` optional then.
+/// Until that exists the command only writes a PNG.
+#[derive(Args)]
+struct TestPatternArgs {
+    /// Canvas width in pixels.
+    #[arg(long)]
+    width: u32,
+    /// Canvas height in pixels.
+    #[arg(long)]
+    height: u32,
+    /// Width of one panel (default: the canvas width).
+    #[arg(long)]
+    panel_width: Option<u32>,
+    /// Height of one panel (default: the canvas height).
+    #[arg(long)]
+    panel_height: Option<u32>,
+    #[arg(long, value_enum, default_value = "bars")]
+    pattern: PatternArg,
+    /// Colour for `--pattern solid`, as "#rrggbb" (default #ffffff).
+    #[arg(long)]
+    color: Option<Color>,
+    /// Frame index (position of `--pattern walk`).
+    #[arg(long, default_value_t = 0)]
+    frame: u64,
+    /// Output PNG.
+    #[arg(long)]
+    out: PathBuf,
+    /// Pixel scale of the output image.
+    #[arg(long, default_value_t = 1)]
+    scale: u32,
+}
+
+fn test_pattern_cmd(a: TestPatternArgs) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        (1..=4096).contains(&a.width) && (1..=4096).contains(&a.height),
+        "--width and --height must be 1..=4096"
+    );
+    let (pw, ph) = (
+        a.panel_width.unwrap_or(a.width),
+        a.panel_height.unwrap_or(a.height),
+    );
+    anyhow::ensure!(
+        pw >= 1 && ph >= 1,
+        "--panel-width and --panel-height must be >= 1"
+    );
+    anyhow::ensure!((1..=64).contains(&a.scale), "--scale must be 1..=64");
+    anyhow::ensure!(
+        a.color.is_none() || matches!(a.pattern, PatternArg::Solid),
+        "--color only applies to --pattern solid"
+    );
+    let pattern = match a.pattern {
+        PatternArg::Bars => Pattern::Bars,
+        PatternArg::Gradient => Pattern::Gradient,
+        PatternArg::PanelIds => Pattern::PanelIds,
+        PatternArg::Grid => Pattern::Grid,
+        PatternArg::Solid => Pattern::Solid(a.color.unwrap_or(Color::WHITE).0),
+        PatternArg::Walk => Pattern::Walk,
+    };
+    let canvas = test_pattern::render(pattern, a.width, a.height, pw, ph, a.frame);
+    std::fs::write(&a.out, png_io::encode(&canvas, a.scale, false))
+        .with_context(|| format!("writing {}", a.out.display()))?;
+    println!("wrote {}", a.out.display());
+    Ok(())
 }
 
 fn main() -> anyhow::Result<()> {
@@ -79,6 +162,7 @@ fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
+        Cmd::TestPattern(args) => test_pattern_cmd(args),
         Cmd::Render {
             config,
             scene,
