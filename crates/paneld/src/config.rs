@@ -18,6 +18,9 @@ use crate::fonts;
 
 pub const MAX_FPS: u32 = 60;
 pub const MAX_PREVIEW_SCALE: u32 = 32;
+pub const MIN_GAMMA: f32 = 1.0;
+pub const MAX_GAMMA: f32 = 4.0;
+pub const MAX_SYNC_GAP_US: u32 = 20_000;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -48,6 +51,74 @@ fn default_fps() -> u32 {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OutputConfig {
     Preview(PreviewOutput),
+    Colorlight(ColorlightOutput),
+}
+
+/// A Colorlight 5A-75B card reached over raw Ethernet (DESIGN.md §4, §8).
+///
+/// In M1 one output maps the whole canvas to card origin (0,0); multi-region
+/// output maps arrive in M6.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ColorlightOutput {
+    /// Network interface the card is attached to, e.g. `eth1`.
+    pub interface: String,
+    /// Gamma exponent for the panel's colour LUT. Valid: 1.0..=4.0.
+    #[serde(default = "default_gamma")]
+    pub gamma: f32,
+    /// Global brightness 0..=255 (see `brightness_mode`).
+    #[serde(default = "default_brightness")]
+    pub brightness: u8,
+    /// Colour a full-white pixel should become; scales R, G and B to match
+    /// the panel's colour temperature.
+    #[serde(default = "default_white_point")]
+    pub white_point: Color,
+    #[serde(default)]
+    pub brightness_mode: BrightnessMode,
+    /// Card firmware major version, for when discovery fails (DESIGN.md §4.2).
+    #[serde(default)]
+    pub firmware_major: Option<u8>,
+    /// Pause between the last row packet and the display frame, in µs.
+    #[serde(default = "default_sync_gap_us")]
+    pub sync_gap_us: u32,
+}
+
+impl ColorlightOutput {
+    /// The brightness byte to put in the card's display frame: the configured
+    /// brightness in hardware mode, 255 in software mode (the LUT scales).
+    pub fn card_brightness(&self) -> u8 {
+        match self.brightness_mode {
+            BrightnessMode::Hardware => self.brightness,
+            BrightnessMode::Software => 255,
+        }
+    }
+}
+
+/// Where global brightness is applied.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrightnessMode {
+    /// In the card's display frame; the colour LUT does not scale.
+    #[default]
+    Hardware,
+    /// In the colour LUT; the card is told 255.
+    Software,
+}
+
+fn default_gamma() -> f32 {
+    2.2
+}
+
+fn default_brightness() -> u8 {
+    255
+}
+
+fn default_white_point() -> Color {
+    Color::WHITE
+}
+
+fn default_sync_gap_us() -> u32 {
+    500
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -196,12 +267,10 @@ impl Config {
     }
 
     pub fn preview(&self) -> Option<&PreviewOutput> {
-        self.outputs
-            .iter()
-            .map(|o| match o {
-                OutputConfig::Preview(p) => p,
-            })
-            .next()
+        self.outputs.iter().find_map(|o| match o {
+            OutputConfig::Preview(p) => Some(p),
+            _ => None,
+        })
     }
 
     pub fn validate(&self) -> Result<(), ConfigErrors> {
@@ -219,6 +288,7 @@ impl Config {
         }
 
         let mut previews = 0;
+        let mut interfaces: Vec<(&str, usize)> = Vec::new();
         for (i, o) in self.outputs.iter().enumerate() {
             match o {
                 OutputConfig::Preview(p) => {
@@ -227,6 +297,33 @@ impl Config {
                         errs.push(format!(
                             "output[{i}] (preview): scale must be 1..={MAX_PREVIEW_SCALE} (got {})",
                             p.scale
+                        ));
+                    }
+                }
+                OutputConfig::Colorlight(cl) => {
+                    let at = format!("output[{i}] (colorlight)");
+                    if cl.interface.trim().is_empty() {
+                        errs.push(format!("{at}: interface must not be empty"));
+                    } else if let Some(&(_, first)) =
+                        interfaces.iter().find(|(name, _)| *name == cl.interface)
+                    {
+                        errs.push(format!(
+                            "{at}: interface {:?} is already used by output[{first}]",
+                            cl.interface
+                        ));
+                    } else {
+                        interfaces.push((&cl.interface, i));
+                    }
+                    if !(cl.gamma.is_finite() && (MIN_GAMMA..=MAX_GAMMA).contains(&cl.gamma)) {
+                        errs.push(format!(
+                            "{at}: gamma must be {MIN_GAMMA}..={MAX_GAMMA} (got {})",
+                            cl.gamma
+                        ));
+                    }
+                    if cl.sync_gap_us > MAX_SYNC_GAP_US {
+                        errs.push(format!(
+                            "{at}: sync_gap_us must be 0..={MAX_SYNC_GAP_US} (got {})",
+                            cl.sync_gap_us
                         ));
                     }
                 }

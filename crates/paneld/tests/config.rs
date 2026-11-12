@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use paneld::config::{Align, Config, OutputConfig, WidgetConfig};
+use paneld::config::{Align, BrightnessMode, Config, OutputConfig, WidgetConfig};
 
 const MINIMAL: &str = r#"
 [canvas]
@@ -49,7 +49,9 @@ fn defaults() {
 #[test]
 fn preview_defaults() {
     let cfg = Config::parse(&format!("{MINIMAL}\n[[output]]\ntype = \"preview\"\n")).unwrap();
-    let OutputConfig::Preview(p) = &cfg.outputs[0];
+    let OutputConfig::Preview(p) = &cfg.outputs[0] else {
+        panic!("expected preview");
+    };
     assert_eq!(p.scale, 8);
     assert!(!p.grid);
 }
@@ -132,4 +134,105 @@ fn rejects_two_previews() {
         "{MINIMAL}[[output]]\ntype = \"preview\"\n[[output]]\ntype = \"preview\"\n"
     ));
     assert!(e.contains("at most one preview output"), "{e}");
+}
+
+fn colorlight(cfg: &Config, i: usize) -> &paneld::config::ColorlightOutput {
+    match &cfg.outputs[i] {
+        OutputConfig::Colorlight(c) => c,
+        other => panic!("expected colorlight, got {other:?}"),
+    }
+}
+
+#[test]
+fn colorlight_defaults() {
+    let cfg = Config::parse(&format!(
+        "{MINIMAL}[[output]]\ntype = \"colorlight\"\ninterface = \"eth1\"\n"
+    ))
+    .unwrap();
+    let c = colorlight(&cfg, 0);
+    assert_eq!(c.interface, "eth1");
+    assert_eq!(c.gamma, 2.2);
+    assert_eq!(c.brightness, 255);
+    assert_eq!(c.white_point.to_string(), "#ffffff");
+    assert_eq!(c.brightness_mode, BrightnessMode::Hardware);
+    assert_eq!(c.firmware_major, None);
+    assert_eq!(c.sync_gap_us, 500);
+    assert_eq!(c.card_brightness(), 255);
+    assert!(cfg.preview().is_none());
+}
+
+#[test]
+fn colorlight_all_fields() {
+    let cfg = Config::parse(&format!(
+        "{MINIMAL}[[output]]\ntype = \"colorlight\"\ninterface = \"eth1\"\ngamma = 1.8\nbrightness = 0\nwhite_point = \"#ffd8b0\"\nbrightness_mode = \"software\"\nfirmware_major = 11\nsync_gap_us = 20000\n[[output]]\ntype = \"preview\"\n"
+    ))
+    .unwrap();
+    let c = colorlight(&cfg, 0);
+    assert_eq!(c.gamma, 1.8);
+    assert_eq!(c.brightness, 0);
+    assert_eq!(c.white_point.to_string(), "#ffd8b0");
+    assert_eq!(c.brightness_mode, BrightnessMode::Software);
+    assert_eq!(c.firmware_major, Some(11));
+    assert_eq!(c.sync_gap_us, 20000);
+    assert_eq!(c.card_brightness(), 255);
+    // preview() finds the preview output even when it is not first.
+    assert!(cfg.preview().is_some());
+}
+
+#[test]
+fn colorlight_requires_interface() {
+    let e = err(&format!("{MINIMAL}[[output]]\ntype = \"colorlight\"\n"));
+    assert!(e.contains("missing field `interface`"), "{e}");
+}
+
+#[test]
+fn colorlight_rejects_unknown_keys_and_modes() {
+    let e = err(&format!(
+        "{MINIMAL}[[output]]\ntype = \"colorlight\"\ninterface = \"eth1\"\nregion = 1\n"
+    ));
+    assert!(e.contains("unknown field `region`"), "{e}");
+    let e = err(&format!(
+        "{MINIMAL}[[output]]\ntype = \"colorlight\"\ninterface = \"eth1\"\nbrightness_mode = \"auto\"\n"
+    ));
+    assert!(e.contains("unknown variant `auto`"), "{e}");
+    let e = err(&format!(
+        "{MINIMAL}[[output]]\ntype = \"colorlight\"\ninterface = \"eth1\"\nbrightness = 256\n"
+    ));
+    assert!(e.contains("256"), "{e}");
+    let e = err(&format!(
+        "{MINIMAL}[[output]]\ntype = \"colorlight\"\ninterface = \"eth1\"\nwhite_point = \"warm\"\n"
+    ));
+    assert!(e.contains(r#"invalid colour "warm""#), "{e}");
+}
+
+#[test]
+fn colorlight_validation_errors() {
+    let e = err(&format!(
+        "{MINIMAL}[[output]]\ntype = \"colorlight\"\ninterface = \"  \"\ngamma = 0.5\nsync_gap_us = 20001\n\
+         [[output]]\ntype = \"colorlight\"\ninterface = \"eth1\"\ngamma = 4.5\n\
+         [[output]]\ntype = \"colorlight\"\ninterface = \"eth2\"\ngamma = nan\n"
+    ));
+    for want in [
+        "output[0] (colorlight): interface must not be empty",
+        "output[0] (colorlight): gamma must be 1..=4 (got 0.5)",
+        "output[0] (colorlight): sync_gap_us must be 0..=20000 (got 20001)",
+        "output[1] (colorlight): gamma must be 1..=4 (got 4.5)",
+        "output[2] (colorlight): gamma must be 1..=4 (got NaN)",
+    ] {
+        assert!(e.contains(want), "missing {want:?} in:\n{e}");
+    }
+}
+
+#[test]
+fn colorlight_rejects_duplicate_interface() {
+    let e = err(&format!(
+        "{MINIMAL}[[output]]\ntype = \"colorlight\"\ninterface = \"eth1\"\n\
+         [[output]]\ntype = \"colorlight\"\ninterface = \"eth2\"\n\
+         [[output]]\ntype = \"colorlight\"\ninterface = \"eth1\"\n"
+    ));
+    assert!(
+        e.contains(r#"output[2] (colorlight): interface "eth1" is already used by output[0]"#),
+        "{e}"
+    );
+    assert!(!e.contains("output[1]"), "{e}");
 }

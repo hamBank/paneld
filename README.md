@@ -40,6 +40,7 @@ See [`config/example.toml`](config/example.toml). Unknown keys are rejected, and
 |---|---|
 | `[canvas]` | `width`, `height`, `fps` (1–60, default 30) |
 | `[[output]]` | `type = "preview"`, `scale` (1–32, default 8), `grid` (default false) |
+| `[[output]]` | `type = "colorlight"`, `interface` (required), `gamma` (1.0–4.0, default 2.2), `brightness` (0–255, default 255), `white_point` (`#rrggbb`, default `#ffffff`), `brightness_mode` (`hardware` default, or `software`), `firmware_major` (optional override), `sync_gap_us` (0–20000, default 500). One output per interface. The sink is not implemented yet: the output is parsed and validated, then ignored with a warning. Multi-region maps come in M6. |
 | `[http]` | `bind` (default `127.0.0.1:8080`) |
 | `[[scene]]` | `name`, `[[scene.zone]]` with `rect = { x, y, w, h }`, `widget`, optional `background = "#rrggbb"` |
 

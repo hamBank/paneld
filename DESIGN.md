@@ -134,9 +134,10 @@ Record the confirmed layouts in `crates/colorlight-proto/PROTOCOL.md` with links
 
 ### 5.2 Post-processing
 Applied per sink (so the preview can show "true" colours while the panel gets corrected output):
-- Gamma LUT (configurable, default ~2.2)
-- Colour temperature / RGB scaling
-- Global brightness (prefer the card's hardware brightness in the latch frame where possible, software scaling as fallback)
+- Gamma LUT (configurable, default 2.2)
+- Colour temperature / RGB scaling, configured as a white point colour
+- Global brightness (`brightness_mode = "hardware"` puts it in the card's display frame; `"software"` folds it into the LUT)
+- All of the above are combined into one 256-entry LUT per channel (`postprocess.rs`; order: gamma, white point, brightness, one rounding)
 - Auto-dim: schedule-based (sunset/sunrise, quiet hours) or driven by a HA lux sensor entity
 
 ### 5.3 Data store
@@ -229,13 +230,18 @@ fps = 30
 
 [[output]]
 type = "colorlight"
-interface = "eth1"
-gamma = 2.2
-brightness = 180
-  [[output.region]]          # one card, two panels stacked
-  canvas = { x = 0, y = 0, w = 172, h = 172 }
-  card_offset = { x = 0, y = 0 }
-  rotate = 0
+interface = "eth1"           # required; at most one output per interface
+gamma = 2.2                  # 1.0..=4.0
+brightness = 180             # 0..=255
+white_point = "#ffd8b0"      # colour temperature as the colour of full white (default #ffffff)
+brightness_mode = "hardware" # "hardware": in the card's display frame; "software": in the colour LUT
+# firmware_major = 11        # optional override if card discovery fails (§4.2)
+sync_gap_us = 500            # 0..=20000: gap between the last row packet and the display frame
+# M1: one output maps the whole canvas to card origin (0,0). Regions come in M6:
+#   [[output.region]]        # one card, two panels stacked
+#   canvas = { x = 0, y = 0, w = 172, h = 172 }
+#   card_offset = { x = 0, y = 0 }
+#   rotate = 0
 
 [[output]]
 type = "preview"

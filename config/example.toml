@@ -11,6 +11,19 @@ type = "preview"   # served at http://<http.bind>/preview
 scale = 4
 grid = true
 
+# Colorlight 5A-75B over raw Ethernet. Needs CAP_NET_RAW and a NIC, so it is
+# commented out here; the sink itself is not implemented yet (M1), and a
+# colorlight output is currently ignored with a warning.
+# [[output]]
+# type = "colorlight"
+# interface = "eth1"            # required, one output per interface
+# gamma = 2.2                   # 1.0..=4.0, default 2.2
+# brightness = 180              # 0..=255, default 255
+# white_point = "#ffd8b0"       # colour of full white, default "#ffffff"
+# brightness_mode = "hardware"  # "hardware" (card display frame) or "software" (LUT)
+# firmware_major = 11           # optional override if card discovery fails
+# sync_gap_us = 500             # 0..=20000, gap before the display frame
+
 [http]
 bind = "127.0.0.1:8080"
 
