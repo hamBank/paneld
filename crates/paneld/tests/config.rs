@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use paneld::config::{Align, BrightnessMode, ColorOrder, Config, OutputConfig, WidgetConfig};
+use paneld::config::{Align, BrightnessMode, ColorOrder, Config, Fill, OutputConfig, WidgetConfig};
 
 const MINIMAL: &str = r#"
 [canvas]
@@ -270,4 +270,130 @@ fn colorlight_rejects_duplicate_interface() {
         "{e}"
     );
     assert!(!e.contains("output[1]"), "{e}");
+}
+
+fn zone(widget: &str) -> String {
+    format!(
+        "{MINIMAL}  [[scene.zone]]\n  rect = {{ x = 0, y = 0, w = 8, h = 8 }}\n  widget = {widget}\n"
+    )
+}
+
+#[test]
+fn value_defaults() {
+    let cfg = Config::parse(&zone(r#"{ type = "value", key = "k" }"#)).unwrap();
+    let WidgetConfig::Value(v) = &cfg.scenes[0].zones[0].widget else {
+        panic!("expected value");
+    };
+    assert_eq!(v.key, "k");
+    assert_eq!(v.format, "{}");
+    assert_eq!(v.unit, None);
+    assert_eq!(v.font, "6x10");
+    assert_eq!(v.color.to_string(), "#ffffff");
+    assert_eq!(v.align, Align::Center);
+    assert_eq!(v.icon, None);
+    assert!(v.thresholds.is_empty());
+    assert_eq!(v.stale_after_s, None);
+}
+
+#[test]
+fn value_all_fields() {
+    let cfg = Config::parse(&zone(
+        r##"{ type = "value", key = "k", format = "{:>5.1}", unit = " W", font = "5x8", color = "#112233", align = "right", icon = "bolt", stale_after_s = 90, thresholds = [{ above = 25.0, color = "#ff4000" }, { above = 10, color = "#00ff00" }] }"##,
+    ))
+    .unwrap();
+    let WidgetConfig::Value(v) = &cfg.scenes[0].zones[0].widget else {
+        panic!("expected value");
+    };
+    assert_eq!(v.format, "{:>5.1}");
+    assert_eq!(v.unit.as_deref(), Some(" W"));
+    assert_eq!(v.icon.as_deref(), Some("bolt"));
+    assert_eq!(v.stale_after_s, Some(90.0));
+    assert_eq!(v.thresholds.len(), 2);
+    assert_eq!(v.thresholds[1].above, 10.0);
+}
+
+#[test]
+fn value_validation_errors() {
+    let e = err(&zone(
+        r##"{ type = "value", key = " ", format = "{:x}", icon = "toaster", stale_after_s = 0, thresholds = [{ above = 1.0, color = "#ffffff" }, { above = 1.0, color = "#000000" }, { above = nan, color = "#000000" }] }"##,
+    ));
+    for want in [
+        r#"scene "a" zone[0] value: key must not be empty"#,
+        r#"scene "a" zone[0] value: format "{:x}": unsupported format spec "x""#,
+        r#"scene "a" zone[0] value: unknown icon "toaster" (known: thermometer, droplet, bolt, sun, cloud, rain, home, wind)"#,
+        r#"scene "a" zone[0] value: thresholds[1].above = 1 is a duplicate"#,
+        r#"scene "a" zone[0] value: thresholds[2].above must be a finite number (got NaN)"#,
+        r#"scene "a" zone[0] value: stale_after_s must be > 0 (got 0)"#,
+    ] {
+        assert!(e.contains(want), "missing {want:?} in:\n{e}");
+    }
+    let e = err(&zone(
+        r#"{ type = "value", key = "k", format = "no placeholder" }"#,
+    ));
+    assert!(e.contains("needs a placeholder"), "{e}");
+    let e = err(&zone(r#"{ type = "value", key = "k", format = "{} {}" }"#));
+    assert!(e.contains("only one placeholder"), "{e}");
+    let e = err(&zone(r#"{ type = "value", key = "k", font = "huge" }"#));
+    assert!(e.contains(r#"unknown font "huge""#), "{e}");
+    let e = err(&zone(
+        r#"{ type = "value", key = "k", stale_after_s = -5 }"#,
+    ));
+    assert!(e.contains("stale_after_s must be > 0 (got -5)"), "{e}");
+    let e = err(&zone(r#"{ type = "value" }"#));
+    assert!(e.contains("missing field `key`"), "{e}");
+    let e = err(&zone(
+        r##"{ type = "value", key = "k", colour = "#ffffff" }"##,
+    ));
+    assert!(e.contains("unknown field `colour`"), "{e}");
+}
+
+#[test]
+fn sparkline_defaults_and_fill_forms() {
+    let cfg = Config::parse(&zone(r#"{ type = "sparkline", key = "k" }"#)).unwrap();
+    let WidgetConfig::Sparkline(s) = &cfg.scenes[0].zones[0].widget else {
+        panic!("expected sparkline");
+    };
+    assert_eq!(s.color.to_string(), "#ffffff");
+    assert_eq!(s.fill, None);
+    assert_eq!((s.min, s.max, s.points), (None, None, None));
+
+    let fill = |f: &str| {
+        let cfg = Config::parse(&zone(&format!(
+            r##"{{ type = "sparkline", key = "k", fill = {f}, min = -1.5, max = 10, points = 30 }}"##
+        )))
+        .unwrap();
+        let WidgetConfig::Sparkline(s) = &cfg.scenes[0].zones[0].widget else {
+            panic!("expected sparkline");
+        };
+        assert_eq!((s.min, s.max, s.points), (Some(-1.5), Some(10.0), Some(30)));
+        s.fill
+    };
+    assert_eq!(fill("true"), Some(Fill::Enabled(true)));
+    assert_eq!(fill("false"), Some(Fill::Enabled(false)));
+    assert!(matches!(fill(r##""#003060""##), Some(Fill::Color(_))));
+}
+
+#[test]
+fn sparkline_validation_errors() {
+    let e = err(&zone(
+        r#"{ type = "sparkline", key = "", min = 5, max = 5, points = 1 }"#,
+    ));
+    for want in [
+        r#"scene "a" zone[0] sparkline: key must not be empty"#,
+        r#"scene "a" zone[0] sparkline: min must be less than max (got min = 5, max = 5)"#,
+        r#"scene "a" zone[0] sparkline: points must be at least 2 (got 1)"#,
+    ] {
+        assert!(e.contains(want), "missing {want:?} in:\n{e}");
+    }
+    let e = err(&zone(r#"{ type = "sparkline", key = "k", min = nan }"#));
+    assert!(
+        e.contains("sparkline: min must be a finite number (got NaN)"),
+        "{e}"
+    );
+    let e = err(&zone(r#"{ type = "sparkline", key = "k", fill = "red" }"#));
+    assert!(e.contains("did not match any variant"), "{e}");
+    let e = err(&zone(r#"{ type = "sparkline", key = "k", font = "6x10" }"#));
+    assert!(e.contains("unknown field `font`"), "{e}");
+    let e = err(&zone(r#"{ type = "sparkline", key = "k", points = -3 }"#));
+    assert!(e.contains("points"), "{e}");
 }

@@ -11,6 +11,8 @@ pub mod colorlight_sink;
 pub mod config;
 pub mod engine;
 pub mod fonts;
+pub mod format;
+pub mod icons;
 pub mod png_io;
 pub mod postprocess;
 pub mod preview;

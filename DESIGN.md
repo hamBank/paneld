@@ -152,7 +152,7 @@ Applied per sink (so the preview can show "true" colours while the panel gets co
 - Auto-dim: schedule-based (sunset/sunrise, quiet hours) or driven by a HA lux sensor entity
 
 ### 5.3 Data store
-- Map of `Key → Value` where `Value` is an enum: `Number(f64, unit)`, `Text`, `Bool`, `Image(Arc<RgbaImage>)`, `Series(Vec<(ts, f64)>)`, `Json`.
+- Map of `Key → Value` where `Value` is an enum: `Number(f64, unit)`, `Text`, `Bool`, `Image(Arc<RgbaImage>)`, `Series(Arc<[(SystemTime, f64)]>)` (immutable, so a per-frame clone is one refcount bump; sources append with `StoreWriter::push_point`), `Json`.
 - Each entry records `updated_at` and source, so widgets can show staleness.
 - Implementation: `ArcSwap<HashMap>` or `RwLock` plus a `tokio::sync::watch` for change notifications. Render reads must be cheap and lock-light.
 

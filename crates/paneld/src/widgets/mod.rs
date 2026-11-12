@@ -1,7 +1,9 @@
 //! Widgets draw into a zone (DESIGN.md §5.4).
 
 mod clock;
+mod sparkline;
 mod text;
+mod value;
 
 use std::time::Duration;
 
@@ -14,7 +16,9 @@ use crate::fonts;
 use crate::store::StoreSnapshot;
 
 pub use clock::Clock;
+pub use sparkline::Sparkline;
 pub use text::Text;
+pub use value::ValueWidget;
 
 /// Per-frame context. Everything time-dependent comes from here so renders
 /// are deterministic for a given context (golden tests rely on this).
@@ -40,6 +44,8 @@ pub fn build(cfg: &WidgetConfig) -> Box<dyn Widget> {
     match cfg {
         WidgetConfig::Clock(c) => Box::new(Clock::new(c)),
         WidgetConfig::Text(t) => Box::new(Text::new(t)),
+        WidgetConfig::Value(v) => Box::new(ValueWidget::new(v)),
+        WidgetConfig::Sparkline(s) => Box::new(Sparkline::new(s)),
     }
 }
 
