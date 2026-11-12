@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use paneld::config::{Align, BrightnessMode, Config, OutputConfig, WidgetConfig};
+use paneld::config::{Align, BrightnessMode, ColorOrder, Config, OutputConfig, WidgetConfig};
 
 const MINIMAL: &str = r#"
 [canvas]
@@ -157,6 +157,7 @@ fn colorlight_defaults() {
     assert_eq!(c.brightness_mode, BrightnessMode::Hardware);
     assert_eq!(c.firmware_major, None);
     assert_eq!(c.sync_gap_us, 500);
+    assert_eq!(c.color_order, ColorOrder::Rgb);
     assert_eq!(c.card_brightness(), 255);
     assert!(cfg.preview().is_none());
 }
@@ -164,7 +165,7 @@ fn colorlight_defaults() {
 #[test]
 fn colorlight_all_fields() {
     let cfg = Config::parse(&format!(
-        "{MINIMAL}[[output]]\ntype = \"colorlight\"\ninterface = \"eth1\"\ngamma = 1.8\nbrightness = 0\nwhite_point = \"#ffd8b0\"\nbrightness_mode = \"software\"\nfirmware_major = 11\nsync_gap_us = 20000\n[[output]]\ntype = \"preview\"\n"
+        "{MINIMAL}[[output]]\ntype = \"colorlight\"\ninterface = \"eth1\"\ngamma = 1.8\nbrightness = 0\nwhite_point = \"#ffd8b0\"\nbrightness_mode = \"software\"\nfirmware_major = 11\nsync_gap_us = 20000\ncolor_order = \"bgr\"\n[[output]]\ntype = \"preview\"\n"
     ))
     .unwrap();
     let c = colorlight(&cfg, 0);
@@ -174,9 +175,36 @@ fn colorlight_all_fields() {
     assert_eq!(c.brightness_mode, BrightnessMode::Software);
     assert_eq!(c.firmware_major, Some(11));
     assert_eq!(c.sync_gap_us, 20000);
+    assert_eq!(c.color_order, ColorOrder::Bgr);
     assert_eq!(c.card_brightness(), 255);
     // preview() finds the preview output even when it is not first.
     assert!(cfg.preview().is_some());
+}
+
+#[test]
+fn colorlight_color_orders() {
+    for (name, order) in [
+        ("rgb", ColorOrder::Rgb),
+        ("rbg", ColorOrder::Rbg),
+        ("grb", ColorOrder::Grb),
+        ("gbr", ColorOrder::Gbr),
+        ("brg", ColorOrder::Brg),
+        ("bgr", ColorOrder::Bgr),
+    ] {
+        let cfg = Config::parse(&format!(
+            "{MINIMAL}[[output]]\ntype = \"colorlight\"\ninterface = \"eth1\"\ncolor_order = \"{name}\"\n"
+        ))
+        .unwrap();
+        assert_eq!(colorlight(&cfg, 0).color_order, order, "{name}");
+    }
+    let e = err(&format!(
+        "{MINIMAL}[[output]]\ntype = \"colorlight\"\ninterface = \"eth1\"\ncolor_order = \"rgbw\"\n"
+    ));
+    assert!(e.contains("unknown variant `rgbw`"), "{e}");
+    let e = err(&format!(
+        "{MINIMAL}[[output]]\ntype = \"colorlight\"\ninterface = \"eth1\"\ncolor_order = \"RGB\"\n"
+    ));
+    assert!(e.contains("unknown variant `RGB`"), "{e}");
 }
 
 #[test]
@@ -203,6 +231,13 @@ fn colorlight_rejects_unknown_keys_and_modes() {
         "{MINIMAL}[[output]]\ntype = \"colorlight\"\ninterface = \"eth1\"\nwhite_point = \"warm\"\n"
     ));
     assert!(e.contains(r#"invalid colour "warm""#), "{e}");
+}
+
+#[test]
+fn color_order_parses_from_cli_strings() {
+    assert_eq!("bgr".parse::<ColorOrder>(), Ok(ColorOrder::Bgr));
+    assert_eq!("GRB".parse::<ColorOrder>(), Ok(ColorOrder::Grb));
+    assert!("rgbw".parse::<ColorOrder>().is_err());
 }
 
 #[test]

@@ -16,8 +16,13 @@ use thiserror::Error;
 
 /// Destination MAC every reference sends to.
 pub const DST_MAC: [u8; 6] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
-/// Source MAC every reference sends from (and the card replies from).
+/// Source MAC every reference sends from.
 pub const SRC_MAC: [u8; 6] = [0x22, 0x22, 0x33, 0x44, 0x55, 0x66];
+
+/// Source MAC of the frames the card sends (discovery replies). It is the
+/// same address the senders use as destination. FPP drops receive frames from
+/// any other source MAC.
+pub const CARD_MAC: [u8; 6] = DST_MAC;
 
 /// Length of the Ethernet header (dst MAC, src MAC, EtherType).
 pub const ETH_HEADER_LEN: usize = 14;
@@ -162,6 +167,14 @@ pub const DISCOVERY_RESPONSE_MIN_LEN: usize = 99;
 /// Value of the model byte (offset 13) on a 5A card. FPP: "0x05 - 5A card".
 pub const MODEL_5A: u8 = 0x05;
 
+/// Full EtherType of a discovery response from a 5A card: type `0x08`, model
+/// `0x05`. FPP opens its receive socket with `htons(0x0805)`, colorlight.rs
+/// names it `DETECT_RECEIVER_RSP = 0x0805`, and hkubota's capture shows
+/// `08 05` at offset 12. Because the second byte is the model, other card
+/// models would use a different value; none is documented, so a kernel-level
+/// filter on this constant only sees 5A cards.
+pub const DISCOVERY_RESPONSE_ETHERTYPE: u16 = 0x0805;
+
 const RESP_MODEL: usize = 13;
 const RESP_FW_MAJOR: usize = 15;
 const RESP_FW_MINOR: usize = 16;
@@ -224,6 +237,17 @@ pub struct DiscoveryResponse {
     pub packets_received: u32,
     /// Card uptime in milliseconds.
     pub uptime_ms: u32,
+}
+
+/// Whether `frame` looks like a discovery response from a card: long enough
+/// for the Ethernet header, sent from [`CARD_MAC`], packet type `0x08`. This
+/// is the filter FPP applies before decoding (it also demands more than 1000
+/// bytes; we only need [`DISCOVERY_RESPONSE_MIN_LEN`], which
+/// [`DiscoveryResponse::decode`] checks).
+pub fn is_card_discovery_reply(frame: &[u8]) -> bool {
+    frame.len() >= ETH_HEADER_LEN
+        && frame[6..12] == CARD_MAC
+        && frame[12] == DISCOVERY_RESPONSE_TYPE
 }
 
 impl DiscoveryResponse {
@@ -635,6 +659,21 @@ mod tests {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ];
+
+    #[test]
+    fn card_discovery_reply_filter() {
+        assert!(is_card_discovery_reply(&HKUBOTA_RESPONSE));
+        assert_eq!(
+            u16::from_be_bytes([HKUBOTA_RESPONSE[12], HKUBOTA_RESPONSE[13]]),
+            DISCOVERY_RESPONSE_ETHERTYPE
+        );
+        // Our own request, a frame from another MAC, and runts are rejected.
+        assert!(!is_card_discovery_reply(&encode_discovery_request(0)));
+        let mut other = HKUBOTA_RESPONSE;
+        other[6] = 0x12;
+        assert!(!is_card_discovery_reply(&other));
+        assert!(!is_card_discovery_reply(&HKUBOTA_RESPONSE[..13]));
+    }
 
     #[test]
     fn discovery_response_decodes_hkubota_capture() {

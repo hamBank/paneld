@@ -115,11 +115,14 @@ Record the confirmed layouts in `crates/colorlight-proto/PROTOCOL.md` with links
   - On firmware **≥ 13**, send `0x01` (and `0x0A`) **twice**, back to back. Older firmware flickers if it gets two, so the count must follow the detected version.
   - `colorlight-proto::needs_double_sync(major)` is the rule (major >= 13).
 - Mixing old and new firmware on one chain is not supported, by FPP or by us.
-- What we do: `probe` prints each card's firmware version and configured size. `ColorlightSink` discovers cards on startup and picks the sync count from the result. An optional `firmware_major` override on the output covers cards that don't answer discovery. Log a warning if cards on one interface disagree, or if the card's reported size doesn't match the configured regions.
+- What we do: `probe` prints each card's firmware version and configured size. `ColorlightSink` discovers cards on startup and picks the sync count from the highest firmware major found. An optional `firmware_major` override on the output wins over discovery (and is used when nothing answers; with neither, the sink warns and assumes firmware < 13). It warns if cards on one interface disagree, or if a card's reported size differs from the canvas. That last check is a warning only, because the reported size need not equal the canvas (two panels on two ports) and FPP calls the field unreliable.
+- Per-frame order as implemented (`colorlight_sink::FrameSender`): `0x0A` (x2 on >= 13), all `0x55` rows with card offset 0, `sync_gap_us` pause, `0x01` (x2 on >= 13). Both brightness frames carry `card_brightness()`. If the rows fail to send, the `0x01` is skipped so the card keeps its last complete frame. Colour order is applied after the LUT, in place, via the output's `color_order`.
+- Errors: a failed frame is counted and logged at most every 5 s; the sink keeps running and re-opens the socket with backoff (1 s up to 10 s) after a fatal error or three failures in a row. The rest of the daemon is unaffected.
 - Deploy docs still recommend a known-good firmware (11.04 for this build). Supporting 13.x is still worth doing, because some panel types reportedly refresh better on 13.x (see the FPP issue).
 
 ### 4.3 Transport (`colorlight-net`)
-- Linux `AF_PACKET` raw socket bound to a configured interface (e.g. `eth1`). Use `socket2` or `pnet_datalink`; prefer minimal deps.
+- Linux `AF_PACKET` raw socket bound to a configured interface (e.g. `eth1`). **Implemented with `libc` directly** (`socket`, `bind`, `sendmmsg`, `poll`, `recv`), not `socket2`/`pnet_datalink`: `libc` is already in the tree through tokio and the calls we need are five. The socket is bound to EtherType `0x0805` so that it only receives discovery replies (the card answers broadcast); sending is not affected by that filter.
+- The `Link` trait (`send(&[&[u8]])`, `recv(buf, timeout)`, `pause`) is what the sink and `discover()` are written against; `colorlight_net::mock::MockLink` replays captured frames in tests, so no test needs root or a NIC.
 - Requires `CAP_NET_RAW`. Run via systemd `AmbientCapabilities=CAP_NET_RAW`. No full root.
 - Batch sends per frame. Measure: a full frame for 2× 172×86 (172×172, ~89 KB of pixel data) is small, but 4+ panels at 60 fps should still be well inside Gigabit. Keep a per-frame send-time metric.
 - Gate behind `cfg(target_os = "linux")`. On macOS/Windows the crate compiles to a stub that errors at runtime, so devs can still build the daemon and use the preview sink.
@@ -244,6 +247,7 @@ brightness = 180             # 0..=255
 white_point = "#ffd8b0"      # colour temperature as the colour of full white (default #ffffff)
 brightness_mode = "hardware" # "hardware": in the card's display frame; "software": in the colour LUT
 # firmware_major = 11        # optional override if card discovery fails (§4.2)
+color_order = "rgb"          # wire byte order: rgb, rbg, grb, gbr, brg, bgr (PROTOCOL.md "Pixel byte order")
 sync_gap_us = 500            # 0..=20000: gap between the last row packet and the display frame
 # M1: one output maps the whole canvas to card origin (0,0). Regions come in M6:
 #   [[output.region]]        # one card, two panels stacked
@@ -353,8 +357,8 @@ Logging: `tracing` with env-filter; JSON output option for journald.
 ## 13. CLI
 - `paneld run --config path`: main daemon
 - `paneld check --config path`: validate config and exit
-- `paneld probe --interface eth1`: detect card(s), print info, needs CAP_NET_RAW
-- `paneld test-pattern --interface eth1 --width W --height H`: colour bars / gradient / per-panel ID numbers, for bring-up
+- `paneld probe --interface eth1 [--timeout-ms 500]`: detect card(s), print index, model, firmware, reported size and whether double sync is needed; exits non-zero if none answer. Needs CAP_NET_RAW.
+- `paneld test-pattern --width W --height H [--out png] [--interface eth1]`: colour bars / gradient / panel IDs / grid / solid / walk, for bring-up. With `--interface` it sends continuously at `--fps` (default 30) until Ctrl-C, using the same sink as `run`, with `--brightness` (default 64), `--gamma` (default 1.0), `--color-order`, `--firmware-major` and `--sync-gap-us`.
 - `paneld render --config path --scene home --out frame.png`: offline render of one scene (uses golden-test path)
 
 ---
@@ -377,6 +381,7 @@ Each milestone ends with: tests green, `cargo clippy -- -D warnings` clean, READ
 
 ## 15. Open questions
 - ~~Exact panel resolution and scan rate~~ **Answered:** 172×86, 1/43 scan (86 rows / 2 = 43 scan lines, the usual two-halves HUB75 layout). Needed for the LEDVision settings in `deploy/README.md`.
+- **Still open for the user (needs the hardware, see `deploy/README.md`):** the card's firmware version (plan: flash V11.x, 11.04 if available; the sink detects the version either way, §4.2); which HUB75 port each panel is on and what LEDVision needs for the right order; the panels' colour order.
 - Card firmware version currently installed. Plan: flash V11.x (11.04 if available). Either way the sink detects the version (§4.2).
 - ~~Side-by-side or stacked~~ **Answered:** stacked vertically, canvas 172×172.
 - Pixel byte order of the actual panels (RGB or BGR). The protocol doesn't say; confirm with the M1 `test-pattern`, then set the output's colour order.

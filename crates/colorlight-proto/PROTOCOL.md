@@ -76,7 +76,9 @@ Tests: `discovery_request_*`. No hex dump of a request exists, so the byte-exact
 
 ## 0x08 Discovery response (EtherType `0x0805`)
 
-Sent by the card, broadcast (dst `ff:ff:ff:ff:ff:ff`, src `11:22:33:44:55:66`; FPP filters on that source MAC). Full length 1070 bytes. Decoder: `DiscoveryResponse::decode`, which needs 99 bytes (through offset 98) and checks only the type byte.
+Sent by the card, broadcast (dst `ff:ff:ff:ff:ff:ff`, src `11:22:33:44:55:66`; FPP filters on that source MAC, `CARD_MAC`, and on type `0x08`: `is_card_discovery_reply`). Full length 1070 bytes.
+
+**EtherType to receive on:** `0x0805` (`DISCOVERY_RESPONSE_ETHERTYPE`). Sources: FPP opens its receive socket with `htons(0x0805)`, CLRS names it `DETECT_RECEIVER_RSP = 0x0805`, and HK's capture has `08 05` at offset 12. The second byte is the model (see below), so this value is specific to 5A cards; no reference documents other models' replies. `colorlight-net` binds its raw socket to this EtherType. Decoder: `DiscoveryResponse::decode`, which needs 99 bytes (through offset 98) and checks only the type byte.
 
 | Offset | Size | Meaning | Sources |
 |---|---|---|---|

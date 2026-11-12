@@ -1,5 +1,5 @@
 # paneld example config. See DESIGN.md §8 for the full planned schema;
-# only what the current milestone (M0) implements is accepted here.
+# only what the current milestone (M1) implements is accepted here.
 
 [canvas]
 width = 172        # two 172x86 panels (1/43 scan) stacked vertically
@@ -12,8 +12,7 @@ scale = 4
 grid = true
 
 # Colorlight 5A-75B over raw Ethernet. Needs CAP_NET_RAW and a NIC, so it is
-# commented out here; the sink itself is not implemented yet (M1), and a
-# colorlight output is currently ignored with a warning.
+# commented out here. See deploy/README.md for bring-up.
 # [[output]]
 # type = "colorlight"
 # interface = "eth1"            # required, one output per interface
@@ -21,6 +20,8 @@ grid = true
 # brightness = 180              # 0..=255, default 255
 # white_point = "#ffd8b0"       # colour of full white, default "#ffffff"
 # brightness_mode = "hardware"  # "hardware" (card display frame) or "software" (LUT)
+# color_order = "rgb"           # wire byte order: rgb, rbg, grb, gbr, brg, bgr
+#                               # (find it with `paneld test-pattern --pattern bars`)
 # firmware_major = 11           # optional override if card discovery fails
 # sync_gap_us = 500             # 0..=20000, gap before the display frame
 
