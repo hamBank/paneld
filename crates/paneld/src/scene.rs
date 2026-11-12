@@ -25,10 +25,18 @@ impl Scene {
             zones: cfg
                 .zones
                 .iter()
-                .map(|z| Zone {
-                    rect: z.rect,
-                    background: z.background.map(|c| c.0),
-                    widget: widgets::build(&z.widget),
+                .map(|z| {
+                    let mut widget = widgets::build(&z.widget);
+                    // One-off sizing work (e.g. scaling every GIF frame) happens
+                    // here, while the config is loaded, not on the first frame.
+                    // Validation guarantees the rect fits the canvas, so this is
+                    // the size `draw` will see.
+                    widget.prepare(z.rect.w, z.rect.h);
+                    Zone {
+                        rect: z.rect,
+                        background: z.background.map(|c| c.0),
+                        widget,
+                    }
                 })
                 .collect(),
         }

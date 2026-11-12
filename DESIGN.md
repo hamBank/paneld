@@ -76,7 +76,7 @@ paneld/
 │   └── paneld/               # the daemon: sources, store, engine, widgets, sinks, control
 ├── config/
 │   └── example.toml
-├── assets/fonts/             # bitmap fonts (BDF/PCF or embedded-graphics fonts)
+├── assets/fonts/             # shipped BDF fonts + licences
 ├── deploy/
 │   ├── paneld.service        # systemd unit
 │   └── README.md             # Pi setup notes
@@ -152,7 +152,8 @@ Applied per sink (so the preview can show "true" colours while the panel gets co
 - Auto-dim: schedule-based (sunset/sunrise, quiet hours) or driven by a HA lux sensor entity
 
 ### 5.3 Data store
-- Map of `Key → Value` where `Value` is an enum: `Number(f64, unit)`, `Text`, `Bool`, `Image(Arc<RgbaImage>)`, `Series(Vec<(ts, f64)>)`, `Json`.
+- Map of `Key → Value` where `Value` is an enum: `Number(f64, unit)`, `Text`, `Bool`, `Image(Arc<Bitmap>)`, `Series(Arc<[(SystemTime, f64)]>)` (immutable, so a per-frame clone is one refcount bump; sources append with `StoreWriter::push_point`), `Json`.
+- `Bitmap` (`media.rs`) is our own small straight-alpha RGBA8 type instead of the `image` crate's `RgbaImage`: the `image` crate pulls in a large codec tree, and we only need PNG (the `png` crate we already use) and GIF (the `gif` crate). Widgets detect a new image by `Arc::ptr_eq`.
 - Each entry records `updated_at` and source, so widgets can show staleness.
 - Implementation: `ArcSwap<HashMap>` or `RwLock` plus a `tokio::sync::watch` for change notifications. Render reads must be cheap and lock-light.
 
@@ -166,13 +167,22 @@ Applied per sink (so the preview can show "true" colours while the panel gets co
       fn draw(&self, target: &mut ZoneTarget<'_>);                 // clipped to zone
   }
   ```
+- `image` widget (M2): `path` (file, relative to the config file) or `key` (a `Value::Image` in the store), `fit` (`contain` default, `cover`, `stretch`, `none`), `align`, `smooth`, `loop`. Scaling is nearest-neighbour unless `smooth` (box filter on axes that shrink), results are cached per (image, zone size), and alpha is blended over the zone background. GIF frames are composited in full (disposal methods and transparency honoured) and picked from `FrameCtx::scene_elapsed`; delays under 20 ms count as 100 ms, like browsers. File decoding happens at config load time (`Config::load_media`), never on the render thread. A future video widget fits the same shape: decode off-thread into frames the widget selects by `scene_elapsed`. `Widget` gained an optional `prepare(zone_w, zone_h)` hook so scaling can be done before the first frame; the widget also copes if it is never called.
 - Initial widgets: `clock`, `text` (static/scrolling, templated from store keys), `value` (number + unit + icon + threshold colours), `sparkline/graph` (from `Series`), `image` (static or GIF), `progress bar`, `icon`.
 - Templating: a small template syntax for text, e.g. `"{ha:sensor.outside_temp:.1}°"`. Keep it minimal and implement it yourself or with a tiny crate. Don't pull in a full template engine.
-- Fonts: bitmap fonts via `embedded-graphics` mono fonts plus BDF loading (e.g. `bdf-parser` / `eg-bdf`) for nicer pixel fonts.
+- Fonts (M2, as built): the `embedded-graphics` ISO-8859-1 mono fonts plus BDF fonts loaded at runtime, behind one `fonts::Font` (a `FontFace` enum of `Mono(&MonoFont)` / `Bdf(Arc<BdfFont>)` plus an integer scale). Decisions:
+  - *Parser:* hand-written (`bdf.rs`, ~250 lines with tests), not `bdf-parser` or `eg-bdf`. The subset we need is a few keywords; our own parser reports `line N` errors that we can put in config errors, handles `DWIDTH` proportional advances directly, and adds no dependency (and no MSRV or `--locked` surface). `bdf-parser` is at 0.1.0 on crates.io. `eg-bdf` does not come up in `cargo search` (checked 2026-11-12); as far as we know it targets compile-time conversion to `static` data, which doesn't fit loading from a path named in config. Revisit `bdf-parser` if BDF support needs to grow beyond this subset.
+  - *Abstraction:* our own `Font` with `text_width`, `line_height` and `draw`, rather than `TextRenderer`/`CharacterStyle` impls. The widgets only need "measure this string, draw it at x/centre-y with an alignment", and an integer scale is easiest as a `DrawTarget` adapter (`ScaleTarget`) that turns each font pixel into an N×N block; built-in fonts are drawn through the stock `MonoTextStyle` onto that adapter, so scale 1 is pixel-identical to the old rendering. BDF glyph pixels are emitted straight into it. No per-glyph rasterised cache: glyph bitmaps are already the cache.
+  - *Config:* `[[font]] name = "...", path = "..."` (explicit table) rather than `[fonts] dir`. Names are decoupled from file names, nothing is loaded that is not asked for, and there is no directory-order dependence. Paths resolve against `Config::base_dir` like image paths. `Config::load_fonts` (called from `parse_in`, so `Config::load` stays a pure path-to-Config step) parses the files and resolves each widget's font into `face`; a widget never touches the filesystem.
+  - *Scale:* `font_scale = N` (1–8) on `clock`/`text`/`value`, not a `"6x10@3"` name suffix. It composes with any font name, needs no string parsing, and is validated like any other number.
+  - *Missing glyphs:* drawn as the font's `?` if it has one, else a blank of the font's `FONTBOUNDINGBOX` width.
+  - Layout: the line box (`FONT_ASCENT + FONT_DESCENT` for BDF) times scale is centred on the zone's mid-line; width is the sum of `DWIDTH` advances.
+  - Shipped fonts live in `assets/fonts/` (Spleen 12x24, 16x32, 32x64, BSD-2-Clause) with licences and sources in `assets/fonts/README.md`.
 
 ### 5.5 Scheduler
 - **Playlist**: ordered scenes with durations. Conditional scenes are skipped when their condition is false.
 - **Notifications**: priority queue. Each notification has priority, duration, optional repeat count, and either a scene ref or inline content (text/icon/colour). Higher priority interrupts the current one, then the playlist resumes **where it left off**.
+- As built in M2 (`scheduler.rs`, `condition.rs`): the scheduler is pure state driven by `tick(now: Instant, &StoreSnapshot)`, so tests inject time. It makes at most one switch per tick (a stalled render loop doesn't fast-forward the playlist), leaves a scene at once if its condition turns false, and returns `None` (black frame, logged once per transition) when nothing is eligible. Conditions are `key op literal`, bare `key` (truthy), `!`, `&&`, `||` and parentheses; a missing key or type mismatch makes a comparison false. `[playlist] default_duration_s` (default 10) is an addition to the §8 schema. `paneld run --scene X` plays a playlist of one.
 - Manual override: pin a scene until released (via MQTT select / HTTP).
 - Transitions: none / cut first; slide/fade later.
 
@@ -198,7 +208,7 @@ Initial sources:
 3. **HTTP poll**: URL + interval + JSON path(s) → keys. Covers weather and generic APIs.
 4. **Prometheus query**: instant queries (and range queries for sparklines) against a Prometheus URL → `Number`/`Series`.
 5. **Clock/system**: time, date, uptime, local CPU temp.
-6. **Media folder**: images/GIFs loaded and scaled to zone size on demand (cached).
+6. **Media folder**: images/GIFs loaded and scaled to zone size on demand (cached). *(M2 only has what the `image` widget needs: `path` files decoded at config load. The folder source, async loading and `media:` keys arrive in M3.)*
 7. **HTTP push** (via control API, §7): external scripts write keys or raise notifications.
 
 ---
@@ -227,7 +237,14 @@ Publish discovery configs so HA auto-creates one device with:
 Also accept raw notification JSON on `<prefix>/notify` (same schema as HTTP). Use `rumqttc`. Availability topic + LWT.
 
 ### 7.3 Config hot reload
-Watch the config file (`notify` crate). On change: parse + validate fully → swap scenes/widgets atomically. Sources whose config changed get restarted, others keep running. On validation error: log, keep the old config, expose `paneld_config_reload_errors_total`.
+Watch the config file. On change: parse + validate fully, build the new scenes and playlist (including image decoding and `Widget::prepare`) off the render thread, then hand the prepared set to the render loop, which swaps it in atomically with a non-blocking check at the top of a frame. Sources whose config changed get restarted, others keep running (source restarts arrive with M3; M2 reloads scenes and playlist only). On error: log, keep the old config, count `config_reload_errors_total` (`ReloadStats::reload_errors`; exported as `paneld_config_reload_errors_total` in M5).
+
+As built (`reload.rs`):
+- **Polling instead of the `notify` crate.** Once a second the file is read and its content hashed. This works the same for in-place writes, rename-and-replace, network filesystems and macOS, is independent of mtime granularity, and adds no dependency. The cost is up to ~2 s latency. SIGHUP (unix) reloads immediately.
+- **Debounce:** a change is parsed once the same new content has been seen on two consecutive polls. Identical content (a touch) never reloads. Content that failed is not retried until it changes or SIGHUP arrives.
+- **Restart-only:** `canvas.fps`, `[http]` and all `[[output]]` settings (including Colorlight gamma, brightness, colour order; applying them live would need a settings channel into each sink, deferred). A difference logs a warning naming it, and scene and playlist changes still apply. A changed canvas width/height is different: the whole reload is rejected, because scenes laid out for the new size would not fit the running canvas.
+- `run --scene X` keeps showing X; if X is gone the reload is rejected.
+- Image files are not watched (limitation); edit the config or send SIGHUP.
 
 ---
 
@@ -285,6 +302,9 @@ type = "http_poll"
 url = "https://example/api/forecast"
 interval_s = 600
 extract = { "weather:temp" = "$.current.temp", "weather:icon" = "$.current.icon" }
+
+[playlist]
+default_duration_s = 10   # used by scenes without duration_s; > 0, at most 86400
 
 [[scene]]
 name = "home"

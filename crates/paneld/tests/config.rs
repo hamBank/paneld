@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use paneld::config::{Align, BrightnessMode, ColorOrder, Config, OutputConfig, WidgetConfig};
+use paneld::config::{Align, BrightnessMode, ColorOrder, Config, Fill, OutputConfig, WidgetConfig};
 
 const MINIMAL: &str = r#"
 [canvas]
@@ -26,6 +26,7 @@ fn example_config_is_valid() {
     assert_eq!((cfg.canvas.width, cfg.canvas.height), (172, 172));
     assert!(cfg.preview().is_some());
     assert!(cfg.scene("home").is_some());
+    assert!(cfg.scene("image").is_some());
 }
 
 #[test]
@@ -270,4 +271,373 @@ fn colorlight_rejects_duplicate_interface() {
         "{e}"
     );
     assert!(!e.contains("output[1]"), "{e}");
+}
+
+#[test]
+fn playlist_defaults_and_scene_fields_parse() {
+    let cfg = Config::parse(&format!(
+        "{MINIMAL}duration_s = 20\ncondition = \"prom:house_power > 0 && !ha:away\"\n[[scene]]\nname = \"b\"\n"
+    ))
+    .unwrap();
+    assert_eq!(cfg.playlist.default_duration_s, 10.0);
+    assert_eq!(cfg.scenes[0].duration_s, Some(20.0));
+    assert!(cfg.scenes[0].condition.is_some());
+    assert_eq!(cfg.scenes[1].duration_s, None);
+    assert_eq!(cfg.scenes[1].condition, None);
+
+    let cfg = Config::parse(&format!("[playlist]\ndefault_duration_s = 2.5\n{MINIMAL}")).unwrap();
+    assert_eq!(cfg.playlist.default_duration_s, 2.5);
+}
+
+#[test]
+fn rejects_bad_durations_and_conditions() {
+    let e = err(&format!(
+        "[playlist]\ndefault_duration_s = 0\n{MINIMAL}duration_s = -3\n\
+         [[scene]]\nname = \"b\"\nduration_s = 1e300\n\
+         [[scene]]\nname = \"c\"\ncondition = \"prom:x >\"\n\
+         [[scene]]\nname = \"d\"\ncondition = \"temp > 1\"\n"
+    ));
+    for want in [
+        "playlist.default_duration_s: must be > 0 and at most 86400 (got 0)",
+        r#"scene "a": duration_s must be > 0 and at most 86400 (got -3)"#,
+        r#"scene "b": duration_s must be > 0 and at most 86400"#,
+        r#"scene "c": invalid condition "prom:x >": unexpected end of expression"#,
+        r#"scene "d": invalid condition "temp > 1": `temp` is not a valid key"#,
+    ] {
+        assert!(e.contains(want), "missing {want:?} in:\n{e}");
+    }
+    assert!(err(&format!("[playlist]\nspeed = 1\n{MINIMAL}")).contains("unknown field"));
+}
+
+fn zone(widget: &str) -> String {
+    format!(
+        "{MINIMAL}  [[scene.zone]]\n  rect = {{ x = 0, y = 0, w = 8, h = 8 }}\n  widget = {widget}\n"
+    )
+}
+
+fn media_dir() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/media")
+}
+
+fn image_cfg(widget: &str) -> String {
+    format!(
+        "{MINIMAL}  [[scene.zone]]\n  rect = {{ x = 0, y = 0, w = 8, h = 8 }}\n  widget = {{ type = \"image\", {widget} }}\n"
+    )
+}
+
+fn image_err(widget: &str) -> String {
+    format!(
+        "{:#}",
+        Config::parse_in(&image_cfg(widget), &media_dir()).expect_err("should be rejected")
+    )
+}
+
+#[test]
+fn value_defaults() {
+    let cfg = Config::parse(&zone(r#"{ type = "value", key = "k" }"#)).unwrap();
+    let WidgetConfig::Value(v) = &cfg.scenes[0].zones[0].widget else {
+        panic!("expected value");
+    };
+    assert_eq!(v.key, "k");
+    assert_eq!(v.format, "{}");
+    assert_eq!(v.unit, None);
+    assert_eq!(v.font, "6x10");
+    assert_eq!(v.color.to_string(), "#ffffff");
+    assert_eq!(v.align, Align::Center);
+    assert_eq!(v.icon, None);
+    assert!(v.thresholds.is_empty());
+    assert_eq!(v.stale_after_s, None);
+}
+
+#[test]
+fn value_all_fields() {
+    let cfg = Config::parse(&zone(
+        r##"{ type = "value", key = "k", format = "{:>5.1}", unit = " W", font = "5x8", color = "#112233", align = "right", icon = "bolt", stale_after_s = 90, thresholds = [{ above = 25.0, color = "#ff4000" }, { above = 10, color = "#00ff00" }] }"##,
+    ))
+    .unwrap();
+    let WidgetConfig::Value(v) = &cfg.scenes[0].zones[0].widget else {
+        panic!("expected value");
+    };
+    assert_eq!(v.format, "{:>5.1}");
+    assert_eq!(v.unit.as_deref(), Some(" W"));
+    assert_eq!(v.icon.as_deref(), Some("bolt"));
+    assert_eq!(v.stale_after_s, Some(90.0));
+    assert_eq!(v.thresholds.len(), 2);
+    assert_eq!(v.thresholds[1].above, 10.0);
+}
+
+#[test]
+fn value_validation_errors() {
+    let e = err(&zone(
+        r##"{ type = "value", key = " ", format = "{:x}", icon = "toaster", stale_after_s = 0, thresholds = [{ above = 1.0, color = "#ffffff" }, { above = 1.0, color = "#000000" }, { above = nan, color = "#000000" }] }"##,
+    ));
+    for want in [
+        r#"scene "a" zone[0] value: key must not be empty"#,
+        r#"scene "a" zone[0] value: format "{:x}": unsupported format spec "x""#,
+        r#"scene "a" zone[0] value: unknown icon "toaster" (known: thermometer, droplet, bolt, sun, cloud, rain, home, wind)"#,
+        r#"scene "a" zone[0] value: thresholds[1].above = 1 is a duplicate"#,
+        r#"scene "a" zone[0] value: thresholds[2].above must be a finite number (got NaN)"#,
+        r#"scene "a" zone[0] value: stale_after_s must be > 0 (got 0)"#,
+    ] {
+        assert!(e.contains(want), "missing {want:?} in:\n{e}");
+    }
+    let e = err(&zone(
+        r#"{ type = "value", key = "k", format = "no placeholder" }"#,
+    ));
+    assert!(e.contains("needs a placeholder"), "{e}");
+    let e = err(&zone(r#"{ type = "value", key = "k", format = "{} {}" }"#));
+    assert!(e.contains("only one placeholder"), "{e}");
+    let e = err(&zone(r#"{ type = "value", key = "k", font = "huge" }"#));
+    assert!(e.contains(r#"unknown font "huge""#), "{e}");
+    let e = err(&zone(
+        r#"{ type = "value", key = "k", stale_after_s = -5 }"#,
+    ));
+    assert!(e.contains("stale_after_s must be > 0 (got -5)"), "{e}");
+    let e = err(&zone(r#"{ type = "value" }"#));
+    assert!(e.contains("missing field `key`"), "{e}");
+    let e = err(&zone(
+        r##"{ type = "value", key = "k", colour = "#ffffff" }"##,
+    ));
+    assert!(e.contains("unknown field `colour`"), "{e}");
+}
+
+#[test]
+fn sparkline_defaults_and_fill_forms() {
+    let cfg = Config::parse(&zone(r#"{ type = "sparkline", key = "k" }"#)).unwrap();
+    let WidgetConfig::Sparkline(s) = &cfg.scenes[0].zones[0].widget else {
+        panic!("expected sparkline");
+    };
+    assert_eq!(s.color.to_string(), "#ffffff");
+    assert_eq!(s.fill, None);
+    assert_eq!((s.min, s.max, s.points), (None, None, None));
+
+    let fill = |f: &str| {
+        let cfg = Config::parse(&zone(&format!(
+            r##"{{ type = "sparkline", key = "k", fill = {f}, min = -1.5, max = 10, points = 30 }}"##
+        )))
+        .unwrap();
+        let WidgetConfig::Sparkline(s) = &cfg.scenes[0].zones[0].widget else {
+            panic!("expected sparkline");
+        };
+        assert_eq!((s.min, s.max, s.points), (Some(-1.5), Some(10.0), Some(30)));
+        s.fill
+    };
+    assert_eq!(fill("true"), Some(Fill::Enabled(true)));
+    assert_eq!(fill("false"), Some(Fill::Enabled(false)));
+    assert!(matches!(fill(r##""#003060""##), Some(Fill::Color(_))));
+}
+
+#[test]
+fn sparkline_validation_errors() {
+    let e = err(&zone(
+        r#"{ type = "sparkline", key = "", min = 5, max = 5, points = 1 }"#,
+    ));
+    for want in [
+        r#"scene "a" zone[0] sparkline: key must not be empty"#,
+        r#"scene "a" zone[0] sparkline: min must be less than max (got min = 5, max = 5)"#,
+        r#"scene "a" zone[0] sparkline: points must be at least 2 (got 1)"#,
+    ] {
+        assert!(e.contains(want), "missing {want:?} in:\n{e}");
+    }
+    let e = err(&zone(r#"{ type = "sparkline", key = "k", min = nan }"#));
+    assert!(
+        e.contains("sparkline: min must be a finite number (got NaN)"),
+        "{e}"
+    );
+    let e = err(&zone(r#"{ type = "sparkline", key = "k", fill = "red" }"#));
+    assert!(e.contains("did not match any variant"), "{e}");
+    let e = err(&zone(r#"{ type = "sparkline", key = "k", font = "6x10" }"#));
+    assert!(e.contains("unknown field `font`"), "{e}");
+    let e = err(&zone(r#"{ type = "sparkline", key = "k", points = -3 }"#));
+    assert!(e.contains("points"), "{e}");
+}
+
+#[test]
+fn image_defaults_and_loading_relative_to_base_dir() {
+    use paneld::config::{Fit, ImageAlign};
+    let cfg = Config::parse_in(&image_cfg(r#"path = "anim.gif""#), &media_dir()).unwrap();
+    let WidgetConfig::Image(i) = &cfg.scenes[0].zones[0].widget else {
+        panic!("expected image");
+    };
+    assert_eq!(i.fit, Fit::Contain);
+    assert_eq!(i.align, ImageAlign::Center);
+    assert!(!i.smooth);
+    assert!(i.looping);
+    assert_eq!(i.loaded.as_ref().unwrap().frames().len(), 3);
+    assert_eq!(cfg.base_dir, media_dir());
+}
+
+#[test]
+fn image_options_parse() {
+    use paneld::config::{Fit, ImageAlign};
+    let cfg = Config::parse_in(
+        &image_cfg(
+            r#"key = "media:x", fit = "cover", align = "bottom_right", smooth = true, loop = false"#,
+        ),
+        &media_dir(),
+    )
+    .unwrap();
+    let WidgetConfig::Image(i) = &cfg.scenes[0].zones[0].widget else {
+        panic!("expected image");
+    };
+    assert_eq!(i.key.as_deref(), Some("media:x"));
+    assert!(i.loaded.is_none());
+    assert_eq!(i.fit, Fit::Cover);
+    assert_eq!(i.align, ImageAlign::BottomRight);
+    assert!(i.smooth && !i.looping);
+}
+
+#[test]
+fn image_needs_exactly_one_of_path_and_key() {
+    let e = image_err("");
+    assert!(e.contains("one of path or key is required"), "{e}");
+    let e = image_err(r#"path = "palette.png", key = "media:x""#);
+    assert!(e.contains("set either path or key, not both"), "{e}");
+    let e = image_err(r#"key = " ""#);
+    assert!(e.contains("key must not be empty"), "{e}");
+}
+
+#[test]
+fn image_load_errors_name_the_file_and_the_reason() {
+    let e = image_err(r#"path = "nope.png""#);
+    assert!(e.contains(r#"scene "a" zone[0] image: cannot load"#), "{e}");
+    assert!(e.contains("nope.png"), "{e}");
+    assert!(e.contains("cannot read file"), "{e}");
+
+    // A file that exists but is not an image.
+    let e = image_err(r#"path = "make_fixtures.py""#);
+    assert!(e.contains("make_fixtures.py"), "{e}");
+    assert!(e.contains("unsupported image format"), "{e}");
+}
+
+#[test]
+fn image_enums_reject_unknown_values() {
+    assert!(image_err(r#"path = "palette.png", fit = "zoom""#).contains("unknown variant `zoom`"));
+    assert!(
+        image_err(r#"path = "palette.png", align = "middle""#).contains("unknown variant `middle`")
+    );
+    assert!(
+        image_err(r#"path = "palette.png", looping = false"#).contains("unknown field `looping`")
+    );
+}
+
+// --- fonts -----------------------------------------------------------------
+
+fn fonts_dir() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/fonts")
+}
+
+/// A one-zone config with `widget`, followed by the `[[font]]` tables in `fonts`.
+fn font_cfg(fonts: &str, widget: &str) -> String {
+    format!(
+        "{MINIMAL}\n  [[scene.zone]]\n  rect = {{ x = 0, y = 0, w = 8, h = 8 }}\n  widget = {widget}\n\n{fonts}"
+    )
+}
+
+fn font_err(fonts: &str, widget: &str) -> String {
+    format!(
+        "{:#}",
+        Config::parse_in(&font_cfg(fonts, widget), &fonts_dir()).expect_err("should be rejected")
+    )
+}
+
+#[test]
+fn fonts_load_relative_to_the_config_directory() {
+    let cfg = Config::parse_in(
+        &font_cfg(
+            "[[font]]\nname = \"prop\"\npath = \"prop.bdf\"\n",
+            "{ type = \"text\", text = \"hi\", font = \"prop\", font_scale = 3 }",
+        ),
+        &fonts_dir(),
+    )
+    .unwrap();
+    assert_eq!(cfg.fonts.len(), 1);
+    assert!(cfg.fonts[0].loaded.is_some());
+    let WidgetConfig::Text(t) = &cfg.scenes[0].zones[0].widget else {
+        panic!("not a text widget");
+    };
+    assert_eq!(t.font_scale, 3);
+    assert!(t.face.is_some());
+}
+
+#[test]
+fn font_scale_defaults_to_one_and_builtin_fonts_need_no_font_table() {
+    let cfg = Config::parse(&font_cfg("", "{ type = \"clock\", font = \"9x15\" }")).unwrap();
+    let WidgetConfig::Clock(c) = &cfg.scenes[0].zones[0].widget else {
+        panic!("not a clock");
+    };
+    assert_eq!(c.font_scale, 1);
+    assert!(c.face.is_some());
+}
+
+#[test]
+fn missing_font_file_names_the_file() {
+    let e = font_err(
+        "[[font]]\nname = \"gone\"\npath = \"nope.bdf\"\n",
+        "{ type = \"clock\" }",
+    );
+    assert!(e.contains("font \"gone\": cannot load"), "{e}");
+    assert!(e.contains("nope.bdf"), "{e}");
+}
+
+#[test]
+fn bad_bdf_reports_file_and_line() {
+    let dir = std::env::temp_dir().join(format!("paneld-font-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("bad.bdf"),
+        "STARTFONT 2.1\nFONTBOUNDINGBOX 4 4 0 0\nSTARTCHAR a\nENCODING 97\nDWIDTH 4 0\nBBX 4 1 0 0\nBITMAP\nXY\nENDCHAR\nENDFONT\n",
+    )
+    .unwrap();
+    let text = font_cfg(
+        "[[font]]\nname = \"bad\"\npath = \"bad.bdf\"\n",
+        "{ type = \"clock\" }",
+    );
+    let e = format!("{:#}", Config::parse_in(&text, &dir).unwrap_err());
+    std::fs::remove_dir_all(&dir).ok();
+    assert!(e.contains("bad.bdf"), "{e}");
+    assert!(e.contains("line 8: invalid hex digits"), "{e}");
+}
+
+#[test]
+fn unknown_font_lists_builtin_and_loaded_names() {
+    let e = font_err(
+        "[[font]]\nname = \"prop\"\npath = \"prop.bdf\"\n",
+        "{ type = \"text\", text = \"x\", font = \"nope\" }",
+    );
+    assert!(e.contains("unknown font \"nope\""), "{e}");
+    assert!(e.contains("6x10") && e.contains("10x20, prop"), "{e}");
+}
+
+#[test]
+fn font_table_validation() {
+    let e = font_err(
+        "[[font]]\nname = \"6x10\"\npath = \"prop.bdf\"\n[[font]]\nname = \"a\"\npath = \"prop.bdf\"\n[[font]]\nname = \"a\"\npath = \"prop.bdf\"\n[[font]]\nname = \" \"\npath = \"\"\n",
+        "{ type = \"clock\" }",
+    );
+    assert!(
+        e.contains("\"6x10\": name is already a built-in font"),
+        "{e}"
+    );
+    assert!(e.contains("\"a\": duplicate font name"), "{e}");
+    assert!(e.contains("font[3]: name must not be empty"), "{e}");
+}
+
+#[test]
+fn font_scale_must_be_1_to_8() {
+    for bad in [0, 9] {
+        let e = err(&font_cfg(
+            "",
+            &format!("{{ type = \"value\", key = \"k\", font_scale = {bad} }}"),
+        ));
+        assert!(
+            e.contains(&format!("font_scale must be 1..=8 (got {bad})")),
+            "{e}"
+        );
+    }
+    let ok = Config::parse(&font_cfg(
+        "",
+        "{ type = \"text\", text = \"a\", font_scale = 8 }",
+    ));
+    assert!(ok.is_ok());
 }

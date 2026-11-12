@@ -14,11 +14,10 @@ use paneld::config::{
     MIN_GAMMA,
 };
 use paneld::engine::{frame_channel, RenderLoop};
-use paneld::scene::Scene;
 use paneld::store::Store;
 use paneld::test_pattern::{self, Pattern};
 use paneld::widgets::FrameCtx;
-use paneld::{png_io, preview, render};
+use paneld::{png_io, preview, reload, render};
 
 #[derive(Parser)]
 #[command(
@@ -36,7 +35,7 @@ enum Cmd {
     Run {
         #[arg(long)]
         config: PathBuf,
-        /// Scene to show. Default: the first one. (Rotation arrives in M2.)
+        /// Show only this scene. Default: rotate through all scenes.
         #[arg(long)]
         scene: Option<String>,
     },
@@ -367,25 +366,16 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
-    let cfg = Config::load(&config_path)?;
-    let scene_cfg = match &scene {
-        Some(name) => cfg
-            .scene(name)
-            .with_context(|| format!("no scene named {name:?}"))?,
-        None => &cfg.scenes[0],
-    };
-
-    let store = Store::new();
+    let (cfg, loaded_text) = Config::load_with_text(&config_path)?;
     let (tx, rx) = frame_channel(cfg.canvas.width, cfg.canvas.height);
-    let render = RenderLoop {
-        width: cfg.canvas.width,
-        height: cfg.canvas.height,
-        fps: cfg.canvas.fps,
-        scene: Scene::from_config(scene_cfg),
-        store,
-    }
-    .spawn(tx)
-    .context("starting render thread")?;
+    let (reload_tx, reload_rx) = std::sync::mpsc::channel();
+    let reload_ctx =
+        reload::ReloadCtx::new(&config_path, &cfg, scene.as_deref()).loaded_from(&loaded_text);
+    let reload_stats = std::sync::Arc::new(reload::ReloadStats::default());
+    let render = RenderLoop::from_config(&cfg, scene.as_deref(), Store::new())?
+        .with_reload(reload_rx)
+        .spawn(tx)
+        .context("starting render thread")?;
 
     let sinks: Vec<_> = cfg
         .outputs
@@ -411,6 +401,7 @@ fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
         let listener = tokio::net::TcpListener::bind(cfg.http.bind)
             .await
             .with_context(|| format!("binding {}", cfg.http.bind))?;
+        reload::spawn(reload_ctx, reload_tx, reload_stats.clone());
         tracing::info!(addr = %cfg.http.bind, "http listening");
         if cfg.preview().is_some() {
             tracing::info!("preview at http://{}/preview", cfg.http.bind);
@@ -421,6 +412,15 @@ fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
             .context("http server")
     });
 
+    tracing::info!(
+        reloads = reload_stats
+            .reloads
+            .load(std::sync::atomic::Ordering::Relaxed),
+        reload_errors = reload_stats
+            .reload_errors
+            .load(std::sync::atomic::Ordering::Relaxed),
+        "config reload totals"
+    );
     // Stop the render loop first so the sinks see no new frames, then the sinks.
     render.stop();
     for sink in sinks {
