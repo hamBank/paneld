@@ -1,6 +1,7 @@
 //! Widgets draw into a zone (DESIGN.md §5.4).
 
 mod clock;
+mod image;
 mod sparkline;
 mod text;
 mod value;
@@ -16,6 +17,7 @@ use crate::fonts;
 use crate::store::StoreSnapshot;
 
 pub use clock::Clock;
+pub use image::Image;
 pub use sparkline::Sparkline;
 pub use text::Text;
 pub use value::ValueWidget;
@@ -35,6 +37,10 @@ pub struct FrameCtx {
 pub trait Widget: Send {
     /// Cheap state advance (scroll position, animation frame). No I/O.
     fn update(&mut self, ctx: &FrameCtx, store: &StoreSnapshot);
+    /// Optional hook, called with the zone size before the first frame, so
+    /// widgets can do one-off sizing work (e.g. pre-scaling images) ahead of
+    /// the first rendered frame. Widgets must still cope if it is never called.
+    fn prepare(&mut self, _zone_w: u32, _zone_h: u32) {}
     /// Draw into the zone. Drawing is clipped to the zone.
     fn draw(&self, target: &mut ZoneTarget<'_>);
 }
@@ -46,6 +52,7 @@ pub fn build(cfg: &WidgetConfig) -> Box<dyn Widget> {
         WidgetConfig::Text(t) => Box::new(Text::new(t)),
         WidgetConfig::Value(v) => Box::new(ValueWidget::new(v)),
         WidgetConfig::Sparkline(s) => Box::new(Sparkline::new(s)),
+        WidgetConfig::Image(i) => Box::new(Image::new(i)),
     }
 }
 

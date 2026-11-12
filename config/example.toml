@@ -68,3 +68,21 @@ condition = "prom:house_power > 0"
   [[scene.zone]]
   rect = { x = 0, y = 0, w = 172, h = 172 }
   widget = { type = "text", text = "paneld", font = "10x20", color = "#00ff80" }
+
+# A still image (or animated GIF) scaled into a zone. `path` is relative to
+# this file and is loaded when the config loads; use `key = "media:..."`
+# instead to show an image a source put in the store (M3).
+[[scene]]
+name = "image"
+  [[scene.zone]]
+  rect = { x = 0, y = 0, w = 172, h = 86 }
+  background = "#101010"
+  widget = { type = "image", path = "../assets/example.png", fit = "contain" }
+  #   fit = "contain" (default) | "cover" | "stretch" | "none"
+  #   align = "center" (default) | "top" | "bottom" | "left" | "right"
+  #           | "top_left" | "top_right" | "bottom_left" | "bottom_right"
+  #   smooth = true     # average pixels when shrinking (photos); default false
+  #   loop = false      # GIF: stop on the last frame; default true
+  [[scene.zone]]
+  rect = { x = 0, y = 86, w = 172, h = 86 }
+  widget = { type = "text", text = "image widget", font = "9x15" }

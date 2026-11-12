@@ -255,6 +255,6 @@ mod tests {
         let e = RenderLoop::from_config(&cfg, Some("nope"), Store::new())
             .err()
             .unwrap();
-        assert!(format!("{e:#}").contains("no scene named \"nope\" (have: home, banner)"));
+        assert!(format!("{e:#}").contains("no scene named \"nope\" (have: home, banner, image)"));
     }
 }

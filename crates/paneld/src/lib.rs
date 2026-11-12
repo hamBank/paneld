@@ -14,6 +14,7 @@ pub mod engine;
 pub mod fonts;
 pub mod format;
 pub mod icons;
+pub mod media;
 pub mod png_io;
 pub mod postprocess;
 pub mod preview;

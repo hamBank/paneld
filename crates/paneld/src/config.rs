@@ -3,10 +3,11 @@
 //! Only what the current milestone implements is accepted; unknown keys are
 //! rejected so typos don't silently do nothing.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -19,6 +20,7 @@ use crate::condition::Condition;
 use crate::fonts;
 use crate::format::NumberFormat;
 use crate::icons;
+use crate::media::Media;
 
 pub const MAX_FPS: u32 = 60;
 pub const MAX_PREVIEW_SCALE: u32 = 32;
@@ -41,6 +43,11 @@ pub struct Config {
     pub playlist: PlaylistConfig,
     #[serde(default, rename = "scene")]
     pub scenes: Vec<SceneConfig>,
+    /// Directory relative media paths are resolved against: the config file's
+    /// directory for [`Config::load`], the working directory for
+    /// [`Config::parse`].
+    #[serde(skip)]
+    pub base_dir: PathBuf,
 }
 
 /// Playlist-wide settings (DESIGN.md §5.5).
@@ -306,6 +313,7 @@ pub enum WidgetConfig {
     Text(TextConfig),
     Value(ValueConfig),
     Sparkline(SparklineConfig),
+    Image(ImageConfig),
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -427,6 +435,88 @@ pub enum Fill {
     Color(Color),
 }
 
+/// A still image or GIF, from a file or from the store.
+///
+/// Exactly one of `path` and `key` must be set.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageConfig {
+    /// PNG or GIF file, relative to the config file's directory. Loaded and
+    /// decoded once, while the config is loaded.
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+    /// Store key holding a `Value::Image` (filled by sources, e.g. `media:…`).
+    #[serde(default)]
+    pub key: Option<String>,
+    #[serde(default)]
+    pub fit: Fit,
+    /// Where the image sits in the zone when it does not fill it.
+    #[serde(default)]
+    pub align: ImageAlign,
+    /// Average source pixels when shrinking instead of picking one. Better
+    /// for photos; leave off for pixel art.
+    #[serde(default)]
+    pub smooth: bool,
+    /// Animated images: restart after the last frame (default) or stop on it.
+    #[serde(default = "default_true", rename = "loop")]
+    pub looping: bool,
+    /// Decoded `path` image, filled in by [`Config::load_media`].
+    #[serde(skip)]
+    pub loaded: Option<Arc<Media>>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// How an image is sized to its zone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Fit {
+    /// Scale (up or down, keeping the aspect ratio) until it fits entirely.
+    #[default]
+    Contain,
+    /// Scale (keeping the aspect ratio) until it covers the zone; crop the rest.
+    Cover,
+    /// Scale each axis independently to exactly fill the zone.
+    Stretch,
+    /// Native size, cropped if larger than the zone.
+    None,
+}
+
+/// Placement of an image inside its zone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageAlign {
+    #[default]
+    Center,
+    Top,
+    Bottom,
+    Left,
+    Right,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl ImageAlign {
+    /// Horizontal and vertical placement as 0 (start), 1 (middle) or 2 (end).
+    pub const fn factors(self) -> (i64, i64) {
+        match self {
+            ImageAlign::TopLeft => (0, 0),
+            ImageAlign::Top => (1, 0),
+            ImageAlign::TopRight => (2, 0),
+            ImageAlign::Left => (0, 1),
+            ImageAlign::Center => (1, 1),
+            ImageAlign::Right => (2, 1),
+            ImageAlign::BottomLeft => (0, 2),
+            ImageAlign::Bottom => (1, 2),
+            ImageAlign::BottomRight => (2, 2),
+        }
+    }
+}
+
 fn default_font() -> String {
     fonts::DEFAULT_FONT.into()
 }
@@ -456,14 +546,62 @@ impl Config {
     pub fn load(path: &Path) -> anyhow::Result<Config> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading config {}", path.display()))?;
-        Config::parse(&text).with_context(|| format!("loading config {}", path.display()))
+        let base = path.parent().unwrap_or(Path::new(""));
+        Config::parse_in(&text, base).with_context(|| format!("loading config {}", path.display()))
     }
 
-    /// Parse and validate config text.
+    /// Parse and validate config text. Relative media paths resolve against
+    /// the working directory; use [`Config::load`] or [`Config::parse_in`] to
+    /// anchor them elsewhere.
     pub fn parse(text: &str) -> anyhow::Result<Config> {
-        let cfg: Config = toml::from_str(text)?;
-        cfg.validate()?;
-        Ok(cfg)
+        Config::parse_in(text, Path::new(""))
+    }
+
+    /// Parse and validate config text, resolving relative media paths against
+    /// `base_dir`. Image files are read and decoded here (blocking), so that
+    /// the render loop never does file I/O; problems are reported as
+    /// validation errors naming the file.
+    pub fn parse_in(text: &str, base_dir: &Path) -> anyhow::Result<Config> {
+        let mut cfg: Config = toml::from_str(text)?;
+        cfg.base_dir = base_dir.to_path_buf();
+        let mut errs = cfg.validate().err().map(|e| e.0).unwrap_or_default();
+        errs.extend(cfg.load_media());
+        if errs.is_empty() {
+            Ok(cfg)
+        } else {
+            Err(ConfigErrors(errs).into())
+        }
+    }
+
+    /// Read and decode every `image` widget's `path` file into its `loaded`
+    /// field (a file used in several zones is decoded once). Returns one
+    /// message per failure. Blocking I/O: config-load time only.
+    pub fn load_media(&mut self) -> Vec<String> {
+        let mut errs = Vec::new();
+        let mut cache: HashMap<PathBuf, Result<Arc<Media>, String>> = HashMap::new();
+        for s in &mut self.scenes {
+            for (i, z) in s.zones.iter_mut().enumerate() {
+                let WidgetConfig::Image(img) = &mut z.widget else {
+                    continue;
+                };
+                let Some(rel) = &img.path else { continue };
+                let full = self.base_dir.join(rel);
+                let result = cache.entry(full.clone()).or_insert_with(|| {
+                    Media::load(&full)
+                        .map(Arc::new)
+                        .map_err(|e| format!("{e:#}"))
+                });
+                match result {
+                    Ok(m) => img.loaded = Some(m.clone()),
+                    Err(e) => errs.push(format!(
+                        "scene {:?} zone[{i}] image: cannot load {}: {e}",
+                        s.name,
+                        full.display()
+                    )),
+                }
+            }
+        }
+        errs
     }
 
     pub fn scene(&self, name: &str) -> Option<&SceneConfig> {
@@ -667,6 +805,22 @@ fn validate_widget(w: &WidgetConfig, at: &str, errs: &mut Vec<String>) {
         WidgetConfig::Value(v) => {
             validate_value(v, at, errs);
             &v.font
+        }
+        WidgetConfig::Image(img) => {
+            match (&img.path, &img.key) {
+                (Some(_), Some(_)) => {
+                    errs.push(format!("{at} image: set either path or key, not both"));
+                }
+                (None, None) => errs.push(format!("{at} image: one of path or key is required")),
+                (Some(p), None) if p.as_os_str().is_empty() => {
+                    errs.push(format!("{at} image: path must not be empty"));
+                }
+                (None, Some(k)) if k.trim().is_empty() => {
+                    errs.push(format!("{at} image: key must not be empty"));
+                }
+                _ => {}
+            }
+            return;
         }
         WidgetConfig::Clock(c) => {
             if c.format.is_empty() {
