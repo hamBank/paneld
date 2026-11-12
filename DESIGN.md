@@ -230,7 +230,14 @@ Publish discovery configs so HA auto-creates one device with:
 Also accept raw notification JSON on `<prefix>/notify` (same schema as HTTP). Use `rumqttc`. Availability topic + LWT.
 
 ### 7.3 Config hot reload
-Watch the config file (`notify` crate). On change: parse + validate fully → swap scenes/widgets atomically. Sources whose config changed get restarted, others keep running. On validation error: log, keep the old config, expose `paneld_config_reload_errors_total`.
+Watch the config file. On change: parse + validate fully, build the new scenes and playlist (including image decoding and `Widget::prepare`) off the render thread, then hand the prepared set to the render loop, which swaps it in atomically with a non-blocking check at the top of a frame. Sources whose config changed get restarted, others keep running (source restarts arrive with M3; M2 reloads scenes and playlist only). On error: log, keep the old config, count `config_reload_errors_total` (`ReloadStats::reload_errors`; exported as `paneld_config_reload_errors_total` in M5).
+
+As built (`reload.rs`):
+- **Polling instead of the `notify` crate.** Once a second the file is read and its content hashed. This works the same for in-place writes, rename-and-replace, network filesystems and macOS, is independent of mtime granularity, and adds no dependency. The cost is up to ~2 s latency. SIGHUP (unix) reloads immediately.
+- **Debounce:** a change is parsed once the same new content has been seen on two consecutive polls. Identical content (a touch) never reloads. Content that failed is not retried until it changes or SIGHUP arrives.
+- **Restart-only:** `canvas.fps`, `[http]` and all `[[output]]` settings (including Colorlight gamma, brightness, colour order; applying them live would need a settings channel into each sink, deferred). A difference logs a warning naming it, and scene and playlist changes still apply. A changed canvas width/height is different: the whole reload is rejected, because scenes laid out for the new size would not fit the running canvas.
+- `run --scene X` keeps showing X; if X is gone the reload is rejected.
+- Image files are not watched (limitation); edit the config or send SIGHUP.
 
 ---
 

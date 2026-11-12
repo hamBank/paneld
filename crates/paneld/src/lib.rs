@@ -18,6 +18,7 @@ pub mod media;
 pub mod png_io;
 pub mod postprocess;
 pub mod preview;
+pub mod reload;
 pub mod render;
 pub mod scene;
 pub mod scheduler;
