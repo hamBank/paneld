@@ -210,6 +210,73 @@ Initial sources:
 5. **Clock/system**: time, date, uptime, local CPU temp.
 6. **Media folder**: images/GIFs loaded and scaled to zone size on demand (cached). *(M2 only has what the `image` widget needs: `path` files decoded at config load. The folder source, async loading and `media:` keys arrive in M3.)*
 7. **HTTP push** (via control API, §7): external scripts write keys or raise notifications.
+8. **Aircraft (ADS-B)**: aircraft currently near a configured point, from adsb.fi, with routes from adsbdb. Built so a local receiver can replace adsb.fi later. See §6.1.
+
+### 6.1 Aircraft source (M3)
+
+Chosen after comparing the free and paid APIs (2026-11-13): adsb.fi is free, needs no key, allows 1 request/s and already returns registration, type, distance and bearing. adsb.lol allows 500 requests/day without a key, which is too few for "what's overhead now". OpenSky has no aircraft type, and paid APIs are overkill.
+
+**Provider: adsb.fi open data.** `GET https://opendata.adsb.fi/api/v2/lat/{lat}/lon/{lon}/dist/{nm}`, radius up to 250 NM. Terms (from its README, checked 2026-11-13):
+- personal, non-commercial use only;
+- public endpoints are limited to 1 request/s, and 400/401/403/404/429 responses count towards the limit;
+- you must cite adsb.fi with a link to its home page. We do that in the README and in the preview page footer whenever the source is configured.
+
+The response is ADS-B Exchange v2 compatible: `{"aircraft": [...], "now", "resultCount", "ptime"}`. Per aircraft we use:
+- `hex`, `flight` (space-padded), `r` (registration), `t` (ICAO type), `desc`;
+- `alt_baro` (feet, or the string `"ground"`), `gs` (knots), `track`, `baro_rate`, `squawk`, `emergency`;
+- `lat`, `lon`, `dst` (NM from the query point), `dir` (bearing in degrees), `seen_pos`.
+
+adsb.lol returns the same objects under `ac` instead of `aircraft`, so the parser accepts both.
+
+**Config:**
+```toml
+[sources.aircraft]
+type = "aircraft"
+# A URL template; {lat} {lon} {radius_nm} are filled in. Default: adsb.fi.
+url = "https://opendata.adsb.fi/api/v2/lat/{lat}/lon/{lon}/dist/{radius_nm}"
+location = { lat = -33.94, lon = 151.18 }   # the point to measure from
+location_decimals = 2      # round before sending (2 = about 1 km); see Privacy
+radius_nm = 10
+max_altitude_ft = 15000    # optional; ignore aircraft above this
+include_ground = false     # ignore aircraft reporting alt_baro = "ground"
+interval_s = 15            # >= 1; adsb.fi allows 1/s, so leave headroom
+routes = true              # look up routes on adsbdb (below)
+list_len = 5               # how many aircraft go into aircraft:list
+```
+
+**Store keys.** Aircraft are filtered (radius, altitude, ground) and then sorted by distance.
+- `aircraft:count` (`Number`).
+- `aircraft:nearest.*` describes the nearest aircraft:
+  - text: `callsign` (trimmed), `registration`, `type`, `desc`, `bearing_compass` (`N`, `NE`, …), `route` (`SYD→AKL`), `origin` and `destination` (IATA, else ICAO);
+  - numbers: `alt_ft`, `speed_kt`, `dist_nm`, `bearing`.
+- `aircraft:list` (`Json`): the nearest `list_len` aircraft with the same fields, for a list widget later. This adds the `Json` store variant that §5.3 already plans.
+- When nothing is in range, `count` is 0 and the `nearest.*` keys are **removed**, so `value` widgets show `--` and conditions such as `aircraft:nearest.alt_ft < 5000` are false. This needs a `StoreWriter::remove`.
+- When a fetch fails, the last values stay, and their `updated_at` ages so `stale_after_s` can grey them out.
+
+**Rate limits and errors.**
+- Never poll faster than `interval_s`.
+- A 429 waits for `Retry-After` (or 60 s).
+- Other errors back off exponentially, up to 5 minutes. They are counted in `source_errors_total{source}` and reported by the M3 supervisor.
+- The User-Agent is a generic `paneld/<version>`, with nothing that identifies the user.
+
+**Routes: adsbdb.** `GET https://api.adsbdb.com/v0/callsign/{callsign}` returns airline, origin and destination. The rules:
+- Look up only the aircraft in `aircraft:list`, and only from the source task, never the render thread.
+- Cache results in memory only: up to 512 callsigns for 12 h, and misses for 1 h. adsbdb's route data may not be copied into other databases, so nothing is persisted.
+- `routes = false` turns lookups off.
+
+**Privacy.** A radius query has to send a location. We send it rounded to `location_decimals` (default 2, about 1 km), and the exact home coordinates are never logged at info level or above. The committed `config/example.toml` uses a public landmark, never a real home. Taking the location from HA's `zone.home` (`location = "ha:zone.home"`) is a possible follow-up once the HA source exists.
+
+**Handles for a local receiver.** The source depends on one contract, so a local receiver can replace adsb.fi with only a `url` change:
+- **Endpoint shape:** an HTTP GET to the templated `url` returns a JSON object with an `aircraft` (or `ac`) array of ADS-B Exchange v2 aircraft objects.
+- **What it can leave out:** `dst`/`dir` (we compute them with haversine from `location`), `r`/`t`/`desc` (those keys are left unset), and the radius filter (we filter again ourselves anyway).
+
+Two local setups that need no paneld change:
+1. **readsb/tar1090 directly:** `url = "http://receiver.local/tar1090/data/aircraft.json"`. It has the same per-aircraft fields. `r`/`t` only appear if readsb runs with its aircraft database (`--db-file`).
+2. **A small separate daemon (later, a separate process):** wraps readsb plus an aircraft database and serves adsb.fi's path, `/v2/lat/{lat}/lon/{lon}/dist/{nm}`, with identical JSON. paneld just points `url` at it. It can also add things adsb.fi can't, such as per-receiver signal strength.
+
+A local source can poll every 1 s, since there is no external limit. Internally everything parses into one `Aircraft` struct; providers differ only by URL and small parser differences (`aircraft` vs `ac`). Tests use recorded fixtures (adsb.fi, adsb.lol and a readsb `aircraft.json`, captured at a public landmark) and a mock HTTP server for the 429 and backoff paths, with no network.
+
+**Display.** Once M3 templating exists, an example "overhead" scene with `condition = "aircraft:count > 0"` can show `{aircraft:nearest.callsign} {aircraft:nearest.route}`, the type and altitude in `value` widgets, and the distance and compass bearing.
 
 ---
 
@@ -303,6 +370,12 @@ url = "https://example/api/forecast"
 interval_s = 600
 extract = { "weather:temp" = "$.current.temp", "weather:icon" = "$.current.icon" }
 
+[sources.aircraft]           # §6.1; adsb.fi by default, a local receiver later by changing `url`
+type = "aircraft"
+location = { lat = -33.94, lon = 151.18 }   # example: Sydney airport, not a home
+radius_nm = 10
+interval_s = 15
+
 [playlist]
 default_duration_s = 10   # used by scenes without duration_s; > 0, at most 86400
 
@@ -389,7 +462,7 @@ CI (GitHub Actions: fmt, clippy, tests, an aarch64 check for the Pi, a macOS che
 1. **M0 Skeleton**: workspace, config parsing, canvas, render loop, preview sink, `clock` + `text` widgets, `paneld render`. Runs on a laptop.
 2. **M1 Hardware**: `colorlight-proto` (with PROTOCOL.md + tests), `colorlight-net`, `probe`, `test-pattern`, ColorlightSink, gamma/brightness. Two panels lit on the Pi.
 3. **M2 Scenes**: zones, playlist rotation, conditions, `value`/`image`/`sparkline` widgets, hot reload.
-4. **M3 Data**: HA WebSocket, MQTT subscribe, HTTP poll, Prometheus sources, templating.
+4. **M3 Data**: HA WebSocket, MQTT subscribe, HTTP poll, Prometheus sources, the aircraft source (adsb.fi + adsbdb routes, §6.1), templating.
 5. **M4 Control**: HTTP API, MQTT discovery entities, notifications queue, quiet hours/auto-dim.
 6. **M5 Ops**: metrics, systemd unit, deploy docs, cross-compile.
 7. **M6 Scale**: multi-region/multi-card output map, rotation/flip.
@@ -406,4 +479,4 @@ Each milestone ends with: tests green, `cargo clippy -- -D warnings` clean, READ
 - ~~Side-by-side or stacked~~ **Answered:** stacked vertically, canvas 172×172.
 - Pixel byte order of the actual panels (RGB or BGR). The protocol doesn't say; confirm with the M1 `test-pattern`, then set the output's colour order.
 - Which HUB75 port(s) each panel is on and how the card maps them (sets `card_offset` in the M1 output map). Confirm in LEDVision.
-- Which HA entities and external APIs to show first (drives M3 priorities).
+- Which HA entities and external APIs to show first (drives M3 priorities). **External APIs, partly answered:** aircraft near me first, via adsb.fi with adsbdb routes, plus hooks for a local receiver later (§6.1). **Still open:** which HA entities, and the location to use. The real location goes only in the user's own config, never in the repo.
