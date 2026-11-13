@@ -1,3 +1,6 @@
 /target
 *.actual.png
 /.claude/worktrees/
+
+# Personal config (real location, entity IDs). Never commit.
+/config/local*.toml

@@ -203,7 +203,11 @@ trait Source {
 Supervisor restarts failed sources with backoff and reports health in metrics.
 
 Initial sources:
-1. **Home Assistant WebSocket**: authenticate with a long-lived token (env var, never in config), `subscribe_entities` or `subscribe_events(state_changed)` filtered to the entity IDs the config references. Keys: `ha:<entity_id>` plus `ha:<entity_id>.<attribute>`.
+1. **Home Assistant WebSocket**: authenticate with a long-lived token (env var, never in config), `subscribe_entities` or `subscribe_events(state_changed)` filtered to the entity IDs the config references. Keys: `ha:<entity_id>` plus `ha:<entity_id>.<attribute>`. Details for M3:
+   - **Values:** a numeric state becomes a `Number`, with its unit taken from the `unit_of_measurement` attribute. `unavailable`/`unknown` remove the key, so widgets show `--` and conditions are false. Anything else becomes `Text`.
+   - **Weather entities:** the state is the condition (`sunny`, `partlycloudy`, `rainy`, …), and the attributes hold the current `temperature`, `humidity`, `wind_speed` and so on. As far as we know, current HA no longer puts the forecast in the attributes; it comes from the `weather.get_forecasts` action, called over the WebSocket with `return_response`. **Confirm this against the HA developer docs before implementing.** When the config asks for forecasts, the source calls it on an interval (default 30 min) and writes `ha:<entity_id>.forecast.<n>.<field>` for the next few periods, with `n = 0` the soonest.
+   - **Series (for sparklines):** for entities listed in `series = [...]`, the source keeps a rolling `Series` at `ha:<entity_id>@series`. It is sampled on every state change and capped by `points`. It can be backfilled at startup from HA's recorder history over the WebSocket; **confirm the command name and payload against the HA docs before implementing.**
+   - **Weather icons:** mapping a weather condition string to an icon needs either a `condition_icons` table on the `value` widget, or a small `weather` widget. Decide in M3.
 2. **MQTT subscribe**: arbitrary topics → keys, with optional JSON path extraction.
 3. **HTTP poll**: URL + interval + JSON path(s) → keys. Covers weather and generic APIs.
 4. **Prometheus query**: instant queries (and range queries for sparklines) against a Prometheus URL → `Number`/`Series`.
@@ -479,4 +483,11 @@ Each milestone ends with: tests green, `cargo clippy -- -D warnings` clean, READ
 - ~~Side-by-side or stacked~~ **Answered:** stacked vertically, canvas 172×172.
 - Pixel byte order of the actual panels (RGB or BGR). The protocol doesn't say; confirm with the M1 `test-pattern`, then set the output's colour order.
 - Which HUB75 port(s) each panel is on and how the card maps them (sets `card_offset` in the M1 output map). Confirm in LEDVision.
-- Which HA entities and external APIs to show first (drives M3 priorities). **External APIs, partly answered:** aircraft near me first, via adsb.fi with adsbdb routes, plus hooks for a local receiver later (§6.1). **Still open:** which HA entities, and the location to use. The real location goes only in the user's own config, never in the repo.
+- ~~Which HA entities and external APIs to show first~~ **Answered (2026-11-13):**
+  - **External APIs:** aircraft near me first, via adsb.fi with adsbdb routes, plus hooks for a local receiver later (§6.1).
+  - **HA, first three entities:**
+    - an outdoor temperature sensor (an Ecowitt-style weather station);
+    - the solar inverter's AC power in W (Fronius), shown as a value and a sparkline (`series`);
+    - a `weather.*` forecast entity: condition, current temperature and forecast.
+  - **Location:** provided.
+  - **Kept out of the repo:** the real entity IDs and the coordinates live only in the user's own config (`config/local*.toml` is git-ignored). Examples, tests and fixtures use generic IDs and a public landmark.
