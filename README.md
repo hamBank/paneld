@@ -63,7 +63,7 @@ See [`config/example.toml`](config/example.toml). Unknown keys are rejected, and
 
 Widgets:
 - `clock`: `format` (strftime, default `%H:%M`), `font`, `font_scale`, `color`, `align`
-- `text`: `text`, `font`, `font_scale`, `color`, `align` (`left`/`center`/`right`), `scroll_px_per_s` (scrolls right to left when set)
+- `text`: `text`, `font`, `font_scale`, `color`, `align` (`left`/`center`/`right`), `scroll_px_per_s` (scrolls right to left when set). `text` may be a template, see Text templates below.
 - `image`: a PNG or GIF scaled into the zone. Set exactly one of `path` (relative to the config file's directory; read and decoded when the config loads, so a bad file is a config error naming it) or `key` (a store key holding an image, filled by sources from M3). Options: `fit` (`contain` default, `cover`, `stretch`, `none`), `align` (`center` default, `top`, `bottom`, `left`, `right`, `top_left`, `top_right`, `bottom_left`, `bottom_right`), `smooth` (average pixels when shrinking, good for photos; default off, which keeps pixel art sharp), `loop` (GIF: default true, false stops on the last frame). Transparency blends over the zone's `background`. GIF frames follow the scene's elapsed time; frame delays under 20 ms are treated as 100 ms. Images are limited to 4096 px per side and 16 MiB per file.
 
 - `value`: shows a number from the store (`Value::Number`).
@@ -71,7 +71,8 @@ Widgets:
   - `format` has exactly one placeholder: `{}` (plain), `{:.N}` (N decimals), `{:>W.N}` / `{:<W.N}` (padded to width W, N optional). `{{` and `}}` are literal braces. Anything else is a config error. Examples: `"{:.1}°"`, `"{:.0} W"`, `"[{:>6.1}]"`.
   - `unit` is appended verbatim after the formatted number (include the space yourself: `unit = " W"`). The unit stored with the value is ignored.
   - `thresholds = [{ above = 25.0, color = "#ff4000" }, …]`: the value takes the colour of the highest `above` it is strictly greater than, else `color`. Any order, `above` values must be unique.
-  - `icon`: one of `thermometer`, `droplet`, `bolt`, `sun`, `cloud`, `rain`, `home`, `wind` (12x12, drawn left of the text in the text colour).
+  - `icon`: one of `thermometer`, `droplet`, `bolt`, `sun`, `cloud`, `rain`, `home`, `wind`, `snow`, `moon`, `fog` (12x12, drawn left of the text in the text colour).
+  - `condition_icons` (optional table) and `show_text` (default true): weather condition icons, see below.
   - Placeholder: `--` in dim grey (`#505050`, icon too) when the key is missing, the value is not a finite number (text, bool, series), or it is older than `stale_after_s` at the frame's time. Without `stale_after_s` a value never goes stale.
 - `sparkline`: a line graph of a `Value::Series`, newest point at the right edge.
   - `key` (required), `color` (default white), `fill` (`true` = dim version of `color`, or a `"#rrggbb"` colour; default none), `min` / `max` (optional fixed scale; each end not given comes from the data), `points` (most recent points to show, at least 2; default the zone width).
@@ -86,6 +87,38 @@ Widgets:
 - `font_scale` (1–8, default 1) on `clock`, `text` and `value` draws every font pixel as an N×N block, for big crisp digits from any font: `font = "10x20", font_scale = 3` is a 30x60 font.
 - BDF support covers the common subset (`FONTBOUNDINGBOX`, `FONT_ASCENT`/`FONT_DESCENT`, `ENCODING`, `DWIDTH`, `BBX`, `BITMAP`), including proportional widths. `ENCODING` is read as a Unicode code point. A character the font lacks is drawn as `?` if the font has one, otherwise it leaves a blank of the font's widest-cell width. Built-in fonts also show `?`.
 - Layout is the same for every font: the line box (`ascent + descent` for BDF, the cell height for built-ins, times `font_scale`) is centred vertically in the zone, and alignment uses the measured text width.
+
+### Text templates
+
+A `text` widget's `text` is literal text with placeholders filled from the store, e.g. `"{ha:sensor.outdoor_temperature:.1}°"` or `"{aircraft:nearest.callsign} {aircraft:nearest.route}"`.
+
+- `{key}` or `{key:spec}`. `key` is `source:name` (`ha:sensor.outdoor_temperature`); the name may contain letters, digits, `_`, `.`, `-` and `@`. `:` also starts the spec, so the split is positional: the first `:` ends the source prefix, the name runs to the second `:`, and everything after the second `:` is the spec. A key needs its source prefix; no whitespace inside the braces.
+- `spec` is the number format used by `value`: `.N` decimals, `>W` / `<W` / `W` width (right-aligned unless `<`), e.g. `{ha:sensor.power:>6.0}`. Default `{}`.
+- Numbers use the spec. Text is inserted as is (width pads it, `.N` truncates it to N characters). Booleans are `on` / `off`. A missing key, a non-finite number or a series, image or JSON value renders as `--` (padded to the width).
+- `{{` and `}}` are literal braces. Text without any braces is plain text. A template error is a config error naming the scene, the zone and the column.
+- Alignment and scrolling use the rendered width, so they follow the values as they change. The template is parsed once, and only re-rendered on frames where a value it shows has changed.
+- Every key in a template is subscribed by the sources like any other referenced key. `clock` formats are strftime and take no templates.
+
+### Weather condition icons
+
+Give a `value` widget a `condition_icons` table and it shows a `Text` value (such as a Home Assistant `weather.*` entity's state) with an icon chosen from it:
+
+```toml
+widget = { type = "value", key = "ha:weather.home", condition_icons = {}, font = "9x15" }
+widget = { type = "value", key = "ha:weather.home", condition_icons = { rainy = "droplet" }, show_text = false, color = "#ffd000" }
+```
+
+The condition is looked up in `condition_icons` first (condition text to icon name), then in the built-in map of Home Assistant's documented conditions, so `condition_icons = {}` means "the built-in map only":
+
+| condition | icon | condition | icon |
+|---|---|---|---|
+| `sunny` | `sun` | `clear-night` | `moon` |
+| `cloudy`, `partlycloudy` | `cloud` | `fog` | `fog` |
+| `rainy`, `pouring` | `rain` | `snowy`, `snowy-rainy`, `hail` | `snow` |
+| `lightning`, `lightning-rainy` | `bolt` | `windy`, `windy-variant` | `wind` |
+| `exceptional` | `thermometer` | | |
+
+The text itself is shown beside the icon; `show_text = false` shows only the icon (a condition with no icon still shows its text). `icon` is used for texts that are in neither map. Without `condition_icons` a `Text` value shows `--`, as before. `stale_after_s` applies as usual. `show_text = false` without `condition_icons` is a config error.
 
 ### Playlist and conditions
 

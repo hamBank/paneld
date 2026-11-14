@@ -11,7 +11,7 @@
 //!
 //! `{{` and `}}` are literal braces. Anything else inside braces is rejected
 //! with an error naming the supported syntax. [`Spec`] is public so that the
-//! M3 templating (`{ha:sensor.x:.1}`) can reuse it for the part after the key.
+//! templating (`{ha:sensor.x:.1}`, see `template.rs`) reuses it for the part after the key.
 
 use std::str::FromStr;
 
@@ -95,16 +95,44 @@ impl Spec {
     /// Format `v`. A negative value that rounds to zero prints without a sign
     /// (`-0.04` with `.1` is `0.0`, not `-0.0`).
     pub fn format(&self, v: f64) -> String {
-        let mut s = match self.precision {
-            Some(p) => format!("{v:.p$}"),
-            None => format!("{v}"),
+        let mut s = String::new();
+        self.write_number(v, &mut s);
+        s
+    }
+
+    /// Append the formatted `v` to `out` (no allocation beyond `out` growing).
+    pub fn write_number(&self, v: f64, out: &mut String) {
+        use std::fmt::Write;
+        let start = out.len();
+        let _ = match self.precision {
+            Some(p) => write!(out, "{v:.p$}"),
+            None => write!(out, "{v}"),
         };
-        if s.starts_with('-') && s[1..].bytes().all(|b| b == b'0' || b == b'.') {
-            s.remove(0);
+        let body = &out[start..];
+        if body.starts_with('-') && body[1..].bytes().all(|b| b == b'0' || b == b'.') {
+            out.remove(start);
         }
+        self.pad(start, out);
+    }
+
+    /// Append `s` to `out`, truncated to the precision (as a character count)
+    /// and padded to the width. For text and booleans in templates.
+    pub fn write_text(&self, s: &str, out: &mut String) {
+        let start = out.len();
+        match self.precision {
+            Some(p) => out.extend(s.chars().take(p)),
+            None => out.push_str(s),
+        }
+        self.pad(start, out);
+    }
+
+    /// Pad what was written since `start` to the width.
+    pub fn pad(&self, start: usize, out: &mut String) {
+        let len = out[start..].chars().count();
+        let fill = self.width.saturating_sub(len);
         match self.align {
-            Align::Right => format!("{s:>w$}", w = self.width),
-            Align::Left => format!("{s:<w$}", w = self.width),
+            Align::Right => (0..fill).for_each(|_| out.insert(start, ' ')),
+            Align::Left => out.extend(std::iter::repeat_n(' ', fill)),
         }
     }
 }
