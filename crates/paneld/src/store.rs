@@ -71,6 +71,19 @@ impl Store {
         before - guard.len()
     }
 
+    /// Remove `source`'s entries last written before `before` (keys a
+    /// restarted source no longer produces). Returns how many were removed.
+    pub fn clear_source_older_than(&self, source: &str, before: SystemTime) -> usize {
+        let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        let stale = |e: &Entry| &*e.source == source && e.updated_at < before;
+        if !guard.values().any(stale) {
+            return 0;
+        }
+        let n = guard.len();
+        Arc::make_mut(&mut guard).retain(|_, e| !stale(e));
+        n - guard.len()
+    }
+
     /// A writer that stamps every value with `source`.
     pub fn writer(&self, source: &str) -> StoreWriter {
         StoreWriter {
@@ -187,6 +200,20 @@ impl StoreWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clear_source_older_than_keeps_fresh_and_foreign_keys() {
+        let store = Store::new();
+        store.writer("a").set("a:old", Value::Bool(true));
+        store.writer("b").set("b:x", Value::Bool(true));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let t = SystemTime::now();
+        store.writer("a").set("a:new", Value::Bool(true));
+        assert_eq!(store.clear_source_older_than("a", t), 1);
+        let mut keys: Vec<_> = store.snapshot().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, vec!["a:new", "b:x"]);
+    }
 
     #[test]
     fn apply_sets_and_removes_atomically() {

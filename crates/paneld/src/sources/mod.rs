@@ -206,6 +206,30 @@ pub struct Supervisor {
     pub health: BTreeMap<String, Arc<SourceHealth>>,
 }
 
+/// How long a restarted source gets to report its first success before its
+/// leftover keys are swept anyway.
+const STALE_SWEEP_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// After a restart: wait for the new instance's first [`SourceCtx::ok`] (or
+/// `timeout`), then remove `name`'s keys last written before `restarted_at`.
+async fn sweep_after_restart(
+    name: String,
+    health: Arc<SourceHealth>,
+    store: Store,
+    restarted_at: SystemTime,
+    timeout: Duration,
+) {
+    let since = unix_ms(restarted_at);
+    let deadline = Instant::now() + timeout;
+    while health.last_ok_unix_ms.load(Ordering::Relaxed) < since && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let n = store.clear_source_older_than(&name, restarted_at);
+    if n > 0 {
+        tracing::info!("source {name}: {n} keys it no longer writes were cleared");
+    }
+}
+
 impl Supervisor {
     /// Start every source in `cfg`. Must be called inside a tokio runtime.
     pub fn start(cfg: &Config, store: &Store) -> Self {
@@ -271,7 +295,8 @@ impl Supervisor {
     /// Make the running sources match `new`, touching only what changed:
     ///
     /// - unchanged (same [`effective_config`]): left running, health intact;
-    /// - changed: stopped, its store keys cleared, started fresh (new health);
+    /// - changed: restarted; its old values stay until the new instance
+    ///   reports success, then keys it no longer writes are removed;
     /// - removed: stopped and its store keys cleared;
     /// - added: started.
     ///
@@ -292,11 +317,31 @@ impl Supervisor {
                 out.errors.push(format!("{e:#}"));
                 continue;
             }
-            if let Some(old) = self.running.remove(name) {
-                Self::stop_one(old).await;
-                store.clear_source(name);
-            }
+            let restarted_at = SystemTime::now();
+            let restarting = match self.running.remove(name) {
+                Some(old) => {
+                    Self::stop_one(old).await;
+                    true
+                }
+                None => false,
+            };
             self.spawn(name, scfg, &referenced, store);
+            if restarting {
+                // Keep the old values on screen until the new instance has
+                // written; then drop only keys it did not rewrite (ones the new
+                // config no longer produces). Clearing at once would flash
+                // placeholders and throw away e.g. a series the new instance
+                // would have continued.
+                if let Some(h) = self.health.get(name) {
+                    tokio::spawn(sweep_after_restart(
+                        name.clone(),
+                        h.clone(),
+                        store.clone(),
+                        restarted_at,
+                        STALE_SWEEP_TIMEOUT,
+                    ));
+                }
+            }
             if changed {
                 tracing::info!("source restarted: {name} (config changed)");
                 out.restarted.push(name.clone());
@@ -560,6 +605,12 @@ mod tests {
             }
         );
         wait_for(&store, "a:x", num(2.0)).await;
+        // The dropped key goes once the new instance has written (no flash
+        // of placeholders for keys it still produces).
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while store.snapshot().contains_key("a:old") && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         assert_eq!(store.snapshot().get("a:old"), None, "old keys are cleared");
         assert!(!Arc::ptr_eq(&sup.health["a"], &ha), "a got a fresh task");
         assert!(Arc::ptr_eq(&sup.health["b"], &hb), "b was not restarted");

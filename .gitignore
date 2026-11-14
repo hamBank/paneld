@@ -4,3 +4,6 @@
 
 # Personal config (real location, entity IDs). Never commit.
 /config/local*.toml
+# Build output anywhere (agents may use their own target dirs)
+target/
+/.claude/scratch-*/
