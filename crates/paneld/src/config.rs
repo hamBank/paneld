@@ -461,6 +461,9 @@ fn default_clock_format() -> String {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TextConfig {
+    /// Literal text, or a template with `{source:name}` / `{source:name:spec}`
+    /// placeholders filled from the store (see `template.rs`). `{{` and `}}`
+    /// are literal braces.
     pub text: String,
     #[serde(default = "default_font")]
     pub font: String,
@@ -518,6 +521,18 @@ pub struct ValueConfig {
     /// Show the placeholder when the value is older than this. Default: never.
     #[serde(default)]
     pub stale_after_s: Option<f64>,
+    /// Turns on condition icons: when the stored value is `Text` (a weather
+    /// condition such as `rainy`), the icon is looked up here by that text,
+    /// then in the built-in Home Assistant map (`icons::DEFAULT_CONDITION_ICONS`),
+    /// and the text itself is shown. An entry maps a text to an icon name.
+    /// `condition_icons = {}` uses just the built-in map. `icon` is the
+    /// fallback for a text that is in neither.
+    #[serde(default)]
+    pub condition_icons: Option<std::collections::BTreeMap<String, String>>,
+    /// With `condition_icons`: show the text beside the icon (default), or
+    /// only the icon when one was found.
+    #[serde(default = "default_true")]
+    pub show_text: bool,
 }
 
 fn default_value_format() -> String {
@@ -804,8 +819,8 @@ impl Config {
 
     /// Every store key the scenes read: widget `key`s and the keys in scene
     /// conditions. Sources use it to subscribe only to what is shown (e.g.
-    /// the Home Assistant source's entity IDs). Text templates add theirs
-    /// once templating exists.
+    /// the Home Assistant source's entity IDs). Includes the keys of text
+    /// templates.
     pub fn referenced_keys(&self) -> std::collections::BTreeSet<String> {
         let mut keys = std::collections::BTreeSet::new();
         for s in &self.scenes {
@@ -825,7 +840,12 @@ impl Config {
                         keys.insert(sp.key.clone());
                     }
                     WidgetConfig::Image(i) => keys.extend(i.key.clone()),
-                    WidgetConfig::Clock(_) | WidgetConfig::Text(_) => {}
+                    WidgetConfig::Text(t) => {
+                        if let Ok(t) = crate::template::Template::parse(&t.text) {
+                            keys.extend(t.keys().map(str::to_owned));
+                        }
+                    }
+                    WidgetConfig::Clock(_) => {}
                 }
             }
         }
@@ -1046,6 +1066,23 @@ fn validate_value(v: &ValueConfig, at: &str, errs: &mut Vec<String>) {
             ));
         }
     }
+    if let Some(map) = &v.condition_icons {
+        for (cond, icon) in map {
+            if cond.trim().is_empty() {
+                errs.push(format!("{at} value: condition_icons has an empty key"));
+            }
+            if icons::lookup(icon).is_none() {
+                errs.push(format!(
+                    "{at} value: condition_icons[{cond:?}]: unknown icon {icon:?} (known: {})",
+                    icons::known_names()
+                ));
+            }
+        }
+    } else if !v.show_text {
+        errs.push(format!(
+            "{at} value: show_text = false needs condition_icons (use condition_icons = {{}} for the built-in map)"
+        ));
+    }
     let mut seen: Vec<f64> = Vec::new();
     for (i, t) in v.thresholds.iter().enumerate() {
         if !t.above.is_finite() {
@@ -1134,6 +1171,9 @@ fn validate_widget(w: &WidgetConfig, at: &str, font_names: &[&str], errs: &mut V
             (&c.font, c.font_scale)
         }
         WidgetConfig::Text(t) => {
+            if let Err(e) = crate::template::Template::parse(&t.text) {
+                errs.push(format!("{at} text: invalid template {:?}: {e}", t.text));
+            }
             if let Some(v) = t.scroll_px_per_s {
                 if !(v.is_finite() && v > 0.0) {
                     errs.push(format!("{at} text: scroll_px_per_s must be > 0 (got {v})"));

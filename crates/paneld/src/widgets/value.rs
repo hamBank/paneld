@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, FixedOffset, Utc};
@@ -30,12 +31,19 @@ pub struct ValueWidget {
     color: Rgb888,
     align: Align,
     icon: Option<&'static Icon>,
+    /// User `condition_icons` (None = condition icons off).
+    condition_icons: Option<HashMap<String, &'static Icon>>,
+    show_text: bool,
     /// Sorted ascending by `above`.
     thresholds: Vec<(f64, Rgb888)>,
     stale_after: Option<Duration>,
     // Computed in `update`.
     text: String,
     text_color: Rgb888,
+    /// The icon to draw this frame (the static `icon`, or a condition's).
+    shown_icon: Option<&'static Icon>,
+    /// False when a condition icon stands in for the text.
+    draw_text: bool,
 }
 
 impl ValueWidget {
@@ -57,12 +65,20 @@ impl ValueWidget {
             color: cfg.color.0,
             align: cfg.align,
             icon: cfg.icon.as_deref().and_then(icons::lookup),
+            condition_icons: cfg.condition_icons.as_ref().map(|m| {
+                m.iter()
+                    .filter_map(|(c, i)| icons::lookup(i).map(|i| (c.clone(), i)))
+                    .collect()
+            }),
+            show_text: cfg.show_text,
             thresholds,
             stale_after: cfg
                 .stale_after_s
                 .map(|s| Duration::try_from_secs_f64(s).unwrap_or(Duration::MAX)),
             text: PLACEHOLDER.into(),
             text_color: PLACEHOLDER_COLOR,
+            shown_icon: cfg.icon.as_deref().and_then(icons::lookup),
+            draw_text: true,
         }
     }
 
@@ -87,22 +103,38 @@ fn is_stale(now: DateTime<FixedOffset>, updated_at: SystemTime, after: Duration)
 
 impl Widget for ValueWidget {
     fn update(&mut self, ctx: &FrameCtx, store: &StoreSnapshot) {
-        let shown = store.get(&self.key).and_then(|e| match &e.value {
-            Value::Number { value, .. } if value.is_finite() => {
-                let stale = self
-                    .stale_after
-                    .is_some_and(|after| is_stale(ctx.now, e.updated_at, after));
-                (!stale).then_some(*value)
-            }
-            _ => None,
+        self.shown_icon = self.icon;
+        self.draw_text = true;
+        let entry = store.get(&self.key).filter(|e| {
+            !self
+                .stale_after
+                .is_some_and(|after| is_stale(ctx.now, e.updated_at, after))
         });
-        match shown {
-            Some(v) => {
+        match entry.map(|e| &e.value) {
+            Some(Value::Number { value, .. }) if value.is_finite() => {
+                let v = *value;
                 self.text = format!("{}{}", self.format.format(v), self.unit);
                 self.text_color = self.color_for(v);
             }
-            None => {
-                self.text = PLACEHOLDER.into();
+            Some(Value::Text(t)) if self.condition_icons.is_some() => {
+                self.text.clear();
+                self.text.push_str(t);
+                self.text_color = self.color;
+                let found = self
+                    .condition_icons
+                    .as_ref()
+                    .and_then(|m| m.get(t.as_str()).copied())
+                    .or_else(|| icons::default_condition_icon(t));
+                if let Some(icon) = found {
+                    self.shown_icon = Some(icon);
+                    self.draw_text = self.show_text;
+                }
+                // No icon for this text: show the text even with
+                // show_text = false, rather than a blank zone.
+            }
+            _ => {
+                self.text.clear();
+                self.text.push_str(PLACEHOLDER);
                 self.text_color = PLACEHOLDER_COLOR;
             }
         }
@@ -110,8 +142,14 @@ impl Widget for ValueWidget {
 
     fn draw(&self, target: &mut ZoneTarget<'_>) {
         let (w, h) = (target.width() as i32, target.height() as i32);
-        let text_w = self.font.text_width(&self.text) as i32;
-        let icon_w = self.icon.map_or(0, |_| ICON_SIZE as i32 + ICON_GAP);
+        let text_w = if self.draw_text {
+            self.font.text_width(&self.text) as i32
+        } else {
+            0
+        };
+        let icon_w = self.shown_icon.map_or(0, |_| {
+            ICON_SIZE as i32 + if self.draw_text { ICON_GAP } else { 0 }
+        });
         let group_w = icon_w + text_w;
         // Too wide to fit: keep the left edge, let the zone clip the rest.
         let x0 = match self.align {
@@ -121,18 +159,20 @@ impl Widget for ValueWidget {
         }
         .max(0);
 
-        if let Some(icon) = self.icon {
+        if let Some(icon) = self.shown_icon {
             let origin = Point::new(x0, (h - ICON_SIZE as i32) / 2);
             icon.draw(target, origin, self.text_color);
         }
-        let _ = self.font.draw(
-            target,
-            &self.text,
-            x0 + icon_w,
-            h / 2,
-            Alignment::Left,
-            self.text_color,
-        );
+        if self.draw_text {
+            let _ = self.font.draw(
+                target,
+                &self.text,
+                x0 + icon_w,
+                h / 2,
+                Alignment::Left,
+                self.text_color,
+            );
+        }
     }
 }
 

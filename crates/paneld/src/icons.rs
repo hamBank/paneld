@@ -2,6 +2,9 @@
 //!
 //! Each icon is 12 rows of 12 characters: `#` is a lit pixel, `.` is off.
 //! The art is const data, so there are no assets to load or embed.
+//!
+//! `snow`, `moon` and `fog` exist for weather conditions (see
+//! [`DEFAULT_CONDITION_ICONS`]); the others are general purpose.
 
 use embedded_graphics::pixelcolor::Rgb888;
 use embedded_graphics::prelude::*;
@@ -174,7 +177,92 @@ pub const ICONS: &[Icon] = &[
             ".....###....",
         ],
     },
+    Icon {
+        name: "snow",
+        rows: [
+            ".....##.....",
+            ".#...##...#.",
+            "..#..##..#..",
+            "...#.##.#...",
+            "....####....",
+            "############",
+            "############",
+            "....####....",
+            "...#.##.#...",
+            "..#..##..#..",
+            ".#...##...#.",
+            ".....##.....",
+        ],
+    },
+    Icon {
+        name: "moon",
+        rows: [
+            "....#####...",
+            "..####......",
+            ".####.......",
+            ".###........",
+            "####........",
+            "####........",
+            "####........",
+            "####........",
+            ".###........",
+            ".####.....#.",
+            "..#########.",
+            "....#####...",
+        ],
+    },
+    Icon {
+        name: "fog",
+        rows: [
+            "....###.....",
+            "...#####.##.",
+            ".##########.",
+            "############",
+            "............",
+            ".##########.",
+            "............",
+            "##########..",
+            "............",
+            ".##########.",
+            "............",
+            "..########..",
+        ],
+    },
 ];
+
+/// Icon for each weather condition Home Assistant defines for `weather.*`
+/// entities, whose state is one of these strings. Source of the list:
+/// <https://contributors.home-assistant.io/core/entities/weather/>
+/// (section "Conditions", fetched 2026-11-14; formerly under
+/// developers.home-assistant.io/docs/core/entity/weather/). The mapping is
+/// ours; there is no partly-cloudy, hail or storm icon, so those use the
+/// nearest of the available ones.
+pub const DEFAULT_CONDITION_ICONS: &[(&str, &str)] = &[
+    ("clear-night", "moon"),
+    ("cloudy", "cloud"),
+    // "Exceptional": extreme or unusual weather, no better fit.
+    ("exceptional", "thermometer"),
+    ("fog", "fog"),
+    ("hail", "snow"),
+    ("lightning", "bolt"),
+    ("lightning-rainy", "bolt"),
+    ("partlycloudy", "cloud"),
+    ("pouring", "rain"),
+    ("rainy", "rain"),
+    ("snowy", "snow"),
+    ("snowy-rainy", "snow"),
+    ("sunny", "sun"),
+    ("windy", "wind"),
+    ("windy-variant", "wind"),
+];
+
+/// Icon for a weather condition from the built-in map.
+pub fn default_condition_icon(condition: &str) -> Option<&'static Icon> {
+    DEFAULT_CONDITION_ICONS
+        .iter()
+        .find(|(c, _)| *c == condition)
+        .and_then(|(_, icon)| lookup(icon))
+}
 
 /// Look up an icon by its config name.
 pub fn lookup(name: &str) -> Option<&'static Icon> {
@@ -213,5 +301,16 @@ mod tests {
         }
         assert!(lookup("nope").is_none());
         assert!(known_names().starts_with("thermometer, droplet"));
+    }
+
+    #[test]
+    fn default_condition_map_points_at_real_icons() {
+        for (cond, icon) in DEFAULT_CONDITION_ICONS {
+            assert!(lookup(icon).is_some(), "{cond} -> {icon}");
+        }
+        assert_eq!(DEFAULT_CONDITION_ICONS.len(), 15);
+        assert_eq!(default_condition_icon("sunny").unwrap().name, "sun");
+        assert_eq!(default_condition_icon("clear-night").unwrap().name, "moon");
+        assert!(default_condition_icon("tornado").is_none());
     }
 }

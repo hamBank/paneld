@@ -25,6 +25,7 @@ pub mod scene;
 pub mod scheduler;
 pub mod sources;
 pub mod store;
+pub mod template;
 pub mod test_pattern;
 pub mod tls;
 pub mod widgets;

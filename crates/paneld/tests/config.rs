@@ -374,7 +374,7 @@ fn value_validation_errors() {
     for want in [
         r#"scene "a" zone[0] value: key must not be empty"#,
         r#"scene "a" zone[0] value: format "{:x}": unsupported format spec "x""#,
-        r#"scene "a" zone[0] value: unknown icon "toaster" (known: thermometer, droplet, bolt, sun, cloud, rain, home, wind)"#,
+        r#"scene "a" zone[0] value: unknown icon "toaster" (known: thermometer, droplet, bolt, sun, cloud, rain, home, wind, snow, moon, fog)"#,
         r#"scene "a" zone[0] value: thresholds[1].above = 1 is a duplicate"#,
         r#"scene "a" zone[0] value: thresholds[2].above must be a finite number (got NaN)"#,
         r#"scene "a" zone[0] value: stale_after_s must be > 0 (got 0)"#,
@@ -760,4 +760,72 @@ condition = "ha:binary_sensor.home && aircraft:count > 0"
             "ha:sensor.t"
         ]
     );
+}
+
+#[test]
+fn referenced_keys_include_text_templates() {
+    let cfg = Config::parse(
+        r#"
+[canvas]
+width = 64
+height = 32
+[[scene]]
+name = "a"
+  [[scene.zone]]
+  rect = { x = 0, y = 0, w = 64, h = 16 }
+  widget = { type = "text", text = "{ha:sensor.outdoor_temperature:.1}° {{literal}} {aircraft:nearest.callsign}" }
+  [[scene.zone]]
+  rect = { x = 0, y = 16, w = 64, h = 16 }
+  widget = { type = "text", text = "plain" }
+"#,
+    )
+    .unwrap();
+    let keys: Vec<_> = cfg.referenced_keys().into_iter().collect();
+    assert_eq!(
+        keys,
+        vec!["aircraft:nearest.callsign", "ha:sensor.outdoor_temperature"]
+    );
+}
+
+#[test]
+fn bad_templates_are_config_errors_naming_scene_zone_and_column() {
+    let e = err(r#"
+[canvas]
+width = 64
+height = 32
+[[scene]]
+name = "weather"
+  [[scene.zone]]
+  rect = { x = 0, y = 0, w = 64, h = 16 }
+  widget = { type = "text", text = "ok" }
+  [[scene.zone]]
+  rect = { x = 0, y = 16, w = 64, h = 16 }
+  widget = { type = "text", text = "T {ha:sensor.t:.1f}" }
+"#);
+    assert!(
+        e.contains(r#"scene "weather" zone[1] text: invalid template"#),
+        "{e}"
+    );
+    assert!(e.contains("column 16:"), "{e}");
+    assert!(e.contains("expected a precision"), "{e}");
+}
+
+#[test]
+fn condition_icons_are_validated() {
+    let zone = |w: &str| {
+        format!(
+            "{MINIMAL}  [[scene.zone]]\n  rect = {{ x = 0, y = 0, w = 32, h = 16 }}\n  widget = {{ type = \"value\", key = \"ha:weather.home\", {w} }}\n"
+        )
+    };
+    let e = err(&zone(
+        r#"condition_icons = { sunny = "sun", rainy = "umbrella" }"#,
+    ));
+    assert!(
+        e.contains(r#"condition_icons["rainy"]: unknown icon "umbrella""#),
+        "{e}"
+    );
+    let e = err(&zone("show_text = false"));
+    assert!(e.contains("show_text = false needs condition_icons"), "{e}");
+    Config::parse(&zone("condition_icons = {}, show_text = false")).unwrap();
+    Config::parse(&zone(r#"condition_icons = { sunny = "moon" }"#)).unwrap();
 }
