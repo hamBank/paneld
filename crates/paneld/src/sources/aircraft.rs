@@ -290,10 +290,10 @@ pub struct Route {
 }
 
 impl Route {
-    /// `SYD→AKL`, only when both ends are known.
-    pub fn text(&self) -> Option<String> {
+    /// `SYD-AKL` (with `separator` between), only when both ends are known.
+    pub fn text(&self, separator: &str) -> Option<String> {
         Some(format!(
-            "{}→{}",
+            "{}{separator}{}",
             self.origin.as_ref()?,
             self.destination.as_ref()?
         ))
@@ -460,7 +460,7 @@ fn number(value: f64) -> Value {
     Value::Number { value, unit: None }
 }
 
-fn list_entry(a: &Aircraft, route: Option<&Route>) -> Json {
+fn list_entry(a: &Aircraft, route: Option<&Route>, route_sep: &str) -> Json {
     let mut m = Map::new();
     let mut put_s = |k: &str, v: Option<String>| {
         if let Some(v) = v {
@@ -473,7 +473,7 @@ fn list_entry(a: &Aircraft, route: Option<&Route>) -> Json {
     put_s("type", a.type_code.clone());
     put_s("desc", a.desc.clone());
     put_s("bearing_compass", Some(compass(a.bearing).into()));
-    put_s("route", route.and_then(Route::text));
+    put_s("route", route.and_then(|r| r.text(route_sep)));
     put_s("origin", route.and_then(|r| r.origin.clone()));
     put_s("destination", route.and_then(|r| r.destination.clone()));
     let mut put_n = |k: &str, v: Option<f64>| {
@@ -495,6 +495,7 @@ pub fn build_changes(
     name: &str,
     list: &[Aircraft],
     list_len: usize,
+    route_sep: &str,
     route_of: &dyn Fn(&str) -> Option<Route>,
 ) -> Vec<Change> {
     let mut out = vec![
@@ -515,7 +516,7 @@ pub fn build_changes(
         text("type", a.type_code.clone());
         text("desc", a.desc.clone());
         text("bearing_compass", Some(compass(a.bearing).into()));
-        text("route", route.as_ref().and_then(Route::text));
+        text("route", route.as_ref().and_then(|r| r.text(route_sep)));
         text("origin", route.as_ref().and_then(|r| r.origin.clone()));
         text(
             "destination",
@@ -534,7 +535,7 @@ pub fn build_changes(
     let entries: Vec<Json> = list
         .iter()
         .take(list_len)
-        .map(|a| list_entry(a, route_for(a).as_ref()))
+        .map(|a| list_entry(a, route_for(a).as_ref(), route_sep))
         .collect();
     out.push(Change::Set(
         format!("{name}:list"),
@@ -604,6 +605,7 @@ struct Publisher {
     name: String,
     store: StoreWriter,
     list_len: usize,
+    route_sep: String,
     routes: bool,
     cache: SharedCache,
     client: reqwest::Client,
@@ -622,7 +624,7 @@ impl Publisher {
             CacheHit::Route(r) if routes => Some(r),
             _ => None,
         };
-        let changes = build_changes(&self.name, list, self.list_len, &route_of);
+        let changes = build_changes(&self.name, list, self.list_len, &self.route_sep, &route_of);
         self.store.apply(changes);
 
         if !self.routes {
@@ -685,6 +687,7 @@ impl Source for AircraftSource {
                 name: ctx.name.to_string(),
                 store: ctx.store.clone(),
                 list_len: cfg.list_len,
+                route_sep: cfg.route_separator.clone(),
                 routes: cfg.routes,
                 cache: Arc::new(Mutex::new(RouteCache::new(ROUTE_CACHE_CAP))),
                 client: client.clone(),

@@ -169,6 +169,11 @@ pub struct AircraftConfig {
     /// How many aircraft go into `<name>:list`, 1 to 20.
     #[serde(default = "default_list_len")]
     pub list_len: usize,
+    /// Text between origin and destination in `route` (`SYD-AKL`). ASCII by
+    /// default: the built-in fonts are ISO-8859-1 and have no `→`; set
+    /// `"→"` if your font has it. At most 8 characters.
+    #[serde(default = "default_route_separator")]
+    pub route_separator: String,
 }
 
 /// A WGS84 coordinate in degrees.
@@ -190,6 +195,9 @@ fn default_radius_nm() -> u32 {
 }
 fn default_aircraft_interval_s() -> f64 {
     15.0
+}
+fn default_route_separator() -> String {
+    "-".into()
 }
 fn default_list_len() -> usize {
     5
@@ -1055,6 +1063,11 @@ impl Config {
                         errs.push(format!(
                             "{at}: interval_s must be 1 to 86400 (got {})",
                             c.interval_s
+                        ));
+                    }
+                    if c.route_separator.chars().count() > 8 {
+                        errs.push(format!(
+                            "{at}: route_separator must be at most 8 characters"
                         ));
                     }
                     if !(1..=20).contains(&c.list_len) {

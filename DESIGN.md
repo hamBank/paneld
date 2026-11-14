@@ -265,7 +265,7 @@ list_len = 5               # how many aircraft go into aircraft:list
 **Store keys.** Aircraft are filtered (radius, altitude, ground) and then sorted by distance.
 - `aircraft:count` (`Number`).
 - `aircraft:nearest.*` describes the nearest aircraft:
-  - text: `callsign` (trimmed), `registration`, `type`, `desc`, `bearing_compass` (`N`, `NE`, …), `route` (`SYD→AKL`), `origin` and `destination` (IATA, else ICAO);
+  - text: `callsign` (trimmed), `registration`, `type`, `desc`, `bearing_compass` (`N`, `NE`, …), `route` (`SYD-AKL`; `route_separator`, default `-` because the built-in ISO-8859-1 fonts have no `→`), `origin` and `destination` (IATA, else ICAO);
   - numbers: `alt_ft`, `speed_kt`, `dist_nm`, `bearing`.
 - `aircraft:list` (`Json`): the nearest `list_len` aircraft with the same fields, for a list widget later. This adds the `Json` store variant that §5.3 already plans.
 - When nothing is in range, `count` is 0 and the `nearest.*` keys are **removed**, so `value` widgets show `--` and conditions such as `aircraft:nearest.alt_ft < 5000` are false. This needs a `StoreWriter::remove`.

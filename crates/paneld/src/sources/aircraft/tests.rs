@@ -216,14 +216,14 @@ fn empty_result_removes_nearest_keys_in_one_batch() {
     let store = Store::new();
     let w = store.writer("aircraft");
     let list = vec![ac("a", 1.234, Some(2000.0), false)];
-    w.apply(build_changes("aircraft", &list, 5, &no_routes));
+    w.apply(build_changes("aircraft", &list, 5, "-", &no_routes));
     let snap = store.snapshot();
     assert!(snap.contains_key("aircraft:nearest.callsign"));
     assert!(snap.contains_key("aircraft:nearest.alt_ft"));
     // An unrelated key from another source must survive.
     store.writer("other").set("aircraft2:x", Value::Bool(true));
 
-    let changes = build_changes("aircraft", &[], 5, &no_routes);
+    let changes = build_changes("aircraft", &[], 5, "-", &no_routes);
     // The first change is the prefix removal, so the whole poll is one batch.
     assert_eq!(changes[0], Change::RemovePrefix("aircraft:nearest.".into()));
     w.apply(changes);
@@ -259,7 +259,7 @@ fn keys_follow_the_source_name_and_carry_route_and_list() {
     let store = Store::new();
     store
         .writer("planes")
-        .apply(build_changes("planes", &[a, b], 1, &route));
+        .apply(build_changes("planes", &[a, b], 1, "→", &route));
     let snap = store.snapshot();
     let text = |k: &str| match &snap[k].value {
         Value::Text(t) => t.clone(),
@@ -405,7 +405,8 @@ fn parses_adsbdb_answers() {
     assert_eq!(r.origin.as_deref(), Some("SYD"));
     // Falls back to ICAO when there is no IATA code.
     assert_eq!(r.destination.as_deref(), Some("YPAD"));
-    assert_eq!(r.text().as_deref(), Some("SYD→YPAD"));
+    assert_eq!(r.text("-").as_deref(), Some("SYD-YPAD"));
+    assert_eq!(r.text("→").as_deref(), Some("SYD→YPAD"));
     assert_eq!(parse_route(br#"{"response":"unknown callsign"}"#), None);
     assert_eq!(parse_route(b"garbage"), None);
     assert!(valid_callsign("QFA749"));
@@ -603,7 +604,7 @@ async fn polls_fixture_rounds_location_and_looks_up_routes_in_the_background() {
     assert!(r.health.up.load(Ordering::Relaxed));
 
     wait_for("route", || {
-        text_of(&r.store, "aircraft:nearest.route").as_deref() == Some("SYD→MEL")
+        text_of(&r.store, "aircraft:nearest.route").as_deref() == Some("SYD-MEL")
     })
     .await;
     assert_eq!(text_of(&r.store, "aircraft:nearest.origin").unwrap(), "SYD");
