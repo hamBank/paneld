@@ -59,6 +59,18 @@ impl Store {
         self.inner.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// Remove every entry written by the source named `source` (the
+    /// [`Entry::source`] stamp), in one write. Returns how many were removed.
+    pub fn clear_source(&self, source: &str) -> usize {
+        let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        let before = guard.len();
+        if !guard.values().any(|e| &*e.source == source) {
+            return 0;
+        }
+        Arc::make_mut(&mut guard).retain(|_, e| &*e.source != source);
+        before - guard.len()
+    }
+
     /// A writer that stamps every value with `source`.
     pub fn writer(&self, source: &str) -> StoreWriter {
         StoreWriter {

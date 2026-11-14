@@ -47,6 +47,8 @@ use tokio::sync::Notify;
 
 use crate::config::Config;
 use crate::engine::SceneSet;
+use crate::sources::Supervisor;
+use crate::store::Store;
 
 pub const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -134,10 +136,6 @@ pub struct RestartOnly {
     /// Colorlight sinks, including gamma, brightness and colour order) are
     /// set up once at start-up.
     outputs: String,
-    /// `Debug` rendering of `[sources]`. Sources are started once at
-    /// start-up; restarting just the changed ones on reload is a follow-up
-    /// (DESIGN.md §7.3).
-    sources: String,
 }
 
 impl RestartOnly {
@@ -147,7 +145,6 @@ impl RestartOnly {
             fps: cfg.canvas.fps,
             http_bind: cfg.http.bind,
             outputs: format!("{:?}", cfg.outputs),
-            sources: format!("{:?}", cfg.sources),
         }
     }
 
@@ -163,9 +160,6 @@ impl RestartOnly {
         if self.outputs != new.outputs {
             v.push("[[output]]");
         }
-        if self.sources != new.sources {
-            v.push("[sources]");
-        }
         v
     }
 }
@@ -173,6 +167,8 @@ impl RestartOnly {
 /// A prepared reload: the scene set plus warnings to log.
 pub struct Prepared {
     pub set: SceneSet,
+    /// The accepted config, for the source supervisor.
+    pub config: Config,
     pub warnings: Vec<String>,
 }
 
@@ -232,7 +228,11 @@ impl ReloadCtx {
                 changed.join(", ")
             ));
         }
-        Ok(Prepared { set, warnings })
+        Ok(Prepared {
+            set,
+            config: cfg,
+            warnings,
+        })
     }
 
     /// One watcher step: poll (or force), and prepare if there is new content.
@@ -253,6 +253,15 @@ impl ReloadCtx {
     }
 }
 
+/// The running source supervisor, so an accepted reload can restart the
+/// sources whose config changed (see [`Supervisor::reconcile`]). The watch
+/// task is its only user besides shutdown, so a plain async mutex is enough.
+#[derive(Clone)]
+pub struct SourceReload {
+    pub supervisor: Arc<tokio::sync::Mutex<Supervisor>>,
+    pub store: Store,
+}
+
 /// The watcher task. Polls every `interval` and on every `force` wake-up
 /// (SIGHUP). File reads and config parsing run on the blocking pool.
 /// Returns when the render loop's receiver is gone.
@@ -263,6 +272,7 @@ pub async fn watch(
     stats: Arc<ReloadStats>,
     interval: Duration,
     force: Arc<Notify>,
+    sources: Option<SourceReload>,
 ) {
     let ctx = Arc::new(ctx);
     let watcher = Arc::new(Mutex::new(watcher));
@@ -288,10 +298,21 @@ pub async fn watch(
                 for w in &p.warnings {
                     tracing::warn!("{w}");
                 }
-                if tx.send(p.set).is_err() {
+                let Prepared { set, config, .. } = p;
+                if tx.send(set).is_err() {
                     return;
                 }
                 stats.reloads.fetch_add(1, Ordering::Relaxed);
+                if let Some(s) = &sources {
+                    // Scenes are already applied; sources follow. A source
+                    // that cannot be changed counts as a reload error and
+                    // keeps its old config.
+                    let done = s.supervisor.lock().await.reconcile(&config, &s.store).await;
+                    for e in &done.errors {
+                        stats.reload_errors.fetch_add(1, Ordering::Relaxed);
+                        tracing::error!("source not restarted, keeping the old one: {e}");
+                    }
+                }
             }
             Ok(Some(Err(e))) => {
                 stats.reload_errors.fetch_add(1, Ordering::Relaxed);
@@ -306,7 +327,12 @@ pub async fn watch(
 }
 
 /// Start watching on the current tokio runtime, including SIGHUP on unix.
-pub fn spawn(ctx: ReloadCtx, tx: Sender<SceneSet>, stats: Arc<ReloadStats>) {
+pub fn spawn(
+    ctx: ReloadCtx,
+    tx: Sender<SceneSet>,
+    stats: Arc<ReloadStats>,
+    sources: Option<SourceReload>,
+) {
     let force = Arc::new(Notify::new());
     #[cfg(unix)]
     {
@@ -326,7 +352,15 @@ pub fn spawn(ctx: ReloadCtx, tx: Sender<SceneSet>, stats: Arc<ReloadStats>) {
         Some(bytes) => ConfigWatcher::with_baseline(&ctx.path, Some(bytes)),
         None => ConfigWatcher::new(&ctx.path),
     };
-    tokio::spawn(watch(ctx, watcher, tx, stats, POLL_INTERVAL, force));
+    tokio::spawn(watch(
+        ctx,
+        watcher,
+        tx,
+        stats,
+        POLL_INTERVAL,
+        force,
+        sources,
+    ));
 }
 
 #[cfg(test)]
@@ -555,6 +589,7 @@ mod tests {
                 stats.clone(),
                 Duration::from_millis(5),
                 force.clone(),
+                None,
             ));
             // Broken file: counted, nothing delivered.
             std::fs::write(&f, "not = [valid").unwrap();
@@ -592,6 +627,86 @@ mod tests {
                 .await
                 .expect("task exits")
                 .unwrap();
+        });
+    }
+
+    #[test]
+    fn watch_task_reconciles_sources_and_counts_a_missing_env_var_as_an_error() {
+        use crate::sources::Supervisor;
+        use crate::store::{Store, Value};
+        let dir = TempDir::new();
+        let f = dir.file("c.toml");
+        let src = |extra: &str| cfg_text(16, 8, 30, &["a"]) + extra;
+        let first = src("[sources.s]\ntype = \"static\"\nvalues = { \"s:x\" = 1 }\n");
+        std::fs::write(&f, &first).unwrap();
+        let c = ReloadCtx::new(&f, &Config::parse(&first).unwrap(), None);
+        let watcher = ConfigWatcher::new(&f);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let stats = Arc::new(ReloadStats::default());
+        let store = Store::new();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let sup = Arc::new(tokio::sync::Mutex::new(Supervisor::start(
+                &Config::parse(&first).unwrap(),
+                &store,
+            )));
+            let h = sup.lock().await.health["s"].clone();
+            let task = tokio::spawn(watch(
+                c,
+                watcher,
+                tx,
+                stats.clone(),
+                Duration::from_millis(5),
+                Arc::new(Notify::new()),
+                Some(SourceReload {
+                    supervisor: sup.clone(),
+                    store: store.clone(),
+                }),
+            ));
+            // A source needing an unset variable: scenes still reload, the
+            // old source keeps running, and an error is counted.
+            std::env::remove_var("PANELD_TEST_RELOAD_MISSING");
+            std::fs::write(
+                &f,
+                src("[sources.s]\ntype = \"home_assistant\"\nurl = \"ws://127.0.0.1:9/x\"\ntoken_env = \"PANELD_TEST_RELOAD_MISSING\"\n"),
+            )
+            .unwrap();
+            for _ in 0..2000 {
+                if stats.reload_errors.load(Ordering::Relaxed) > 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert_eq!(stats.reload_errors.load(Ordering::Relaxed), 1);
+            assert_eq!(stats.reloads.load(Ordering::Relaxed), 1);
+            assert!(rx.try_recv().is_ok());
+            assert!(Arc::ptr_eq(&sup.lock().await.health["s"], &h));
+
+            // Changing the values restarts it.
+            std::fs::write(
+                &f,
+                src("[sources.s]\ntype = \"static\"\nvalues = { \"s:x\" = 2 }\n"),
+            )
+            .unwrap();
+            let two = Some(Value::Number {
+                value: 2.0,
+                unit: None,
+            });
+            for _ in 0..2000 {
+                if store.snapshot().get("s:x").map(|e| e.value.clone()) == two {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert_eq!(Some(store.snapshot()["s:x"].value.clone()), two);
+            assert!(!Arc::ptr_eq(&sup.lock().await.health["s"], &h));
+            drop(rx);
+            task.abort();
+            sup.lock().await.stop_all(Duration::from_secs(1)).await;
         });
     }
 }
