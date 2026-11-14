@@ -68,9 +68,11 @@ fn parses_adsb_fi_fixture() {
     assert_eq!(jst.desc.as_deref(), Some("AIRBUS A-320"));
     assert!(jst.on_ground);
     assert_eq!(jst.alt_ft, None);
-    // dst/dir come from the provider when present.
-    assert_eq!(jst.dist_nm, 0.288);
-    assert_eq!(jst.bearing, 203.6);
+    // dst/dir are computed by us (the provider's are relative to the rounded
+    // query point). Here the query point was SYD itself, so they agree with
+    // the provider's 0.288 NM / 203.6° to within rounding of its lat/lon.
+    assert!((jst.dist_nm - 0.288).abs() < 0.01, "{}", jst.dist_nm);
+    assert!((jst.bearing - 203.6).abs() < 1.0, "{}", jst.bearing);
     // A ground vehicle with a blank callsign.
     let veh = list.iter().find(|a| a.hex == "7cf441").unwrap();
     assert_eq!(veh.callsign, None);
@@ -304,19 +306,19 @@ fn location_is_rounded_before_it_reaches_the_url() {
     // Sydney airport's published coordinates, with 4 decimals.
     assert_eq!(
         fill_url(&cfg(-33.9461, 151.1772, 2)),
-        "https://opendata.adsb.fi/api/v2/lat/-33.95/lon/151.18/dist/25"
+        "https://opendata.adsb.fi/api/v2/lat/-33.95/lon/151.18/dist/26"
     );
     assert_eq!(
         fill_url(&cfg(-33.9461, 151.1772, 1)),
-        "https://opendata.adsb.fi/api/v2/lat/-33.9/lon/151.2/dist/25"
+        "https://opendata.adsb.fi/api/v2/lat/-33.9/lon/151.2/dist/30"
     );
     assert_eq!(
         fill_url(&cfg(-33.9461, 151.1772, 0)),
-        "https://opendata.adsb.fi/api/v2/lat/-34/lon/151/dist/25"
+        "https://opendata.adsb.fi/api/v2/lat/-34/lon/151/dist/68"
     );
     assert_eq!(
         fill_url(&cfg(-33.9461, 151.1772, 3)),
-        "https://opendata.adsb.fi/api/v2/lat/-33.946/lon/151.177/dist/25"
+        "https://opendata.adsb.fi/api/v2/lat/-33.946/lon/151.177/dist/26"
     );
     // No exact digits survive, and no "-0.00".
     assert_eq!(fmt_coord(-0.001, 2), "0.00");
@@ -587,9 +589,12 @@ async fn polls_fixture_rounds_location_and_looks_up_routes_in_the_background() {
         "JST520"
     );
     assert_eq!(text_of(&r.store, "aircraft:nearest.type").unwrap(), "A320");
+    // Measured from the exact configured point (-33.9461, 151.1772), not
+    // the point the fixture was captured at (-33.94, 151.18, from which the
+    // provider says SW): the aircraft is ~0.1 NM north of the exact point.
     assert_eq!(
         text_of(&r.store, "aircraft:nearest.bearing_compass").unwrap(),
-        "SW"
+        "N"
     );
     assert!(
         !snap.contains_key("aircraft:nearest.route"),
@@ -615,10 +620,11 @@ async fn polls_fixture_rounds_location_and_looks_up_routes_in_the_background() {
     assert_eq!(rh, ["JST520", "QFA148", "SIA211", "SSM1"]);
 
     let hits = mock.hits.lock().unwrap();
-    // The location in the request is rounded to 2 decimals.
+    // The location in the request is rounded to 2 decimals, and the radius
+    // widened by the rounding error (10 NM + 0.42, rounded up).
     assert!(
         hits.iter()
-            .all(|(_, p)| p == "/v2/lat/-33.95/lon/151.18/dist/10"),
+            .all(|(_, p)| p == "/v2/lat/-33.95/lon/151.18/dist/11"),
         "{:?}",
         hits[0]
     );
@@ -814,4 +820,26 @@ async fn shutdown_interrupts_a_long_wait() {
     );
     wait_for("429", || mock.hits.lock().unwrap().len() == 1).await;
     r.finish().await;
+}
+
+#[test]
+fn distances_use_the_exact_location_not_the_rounded_query_point() {
+    // An aircraft exactly at the configured point: the provider (queried at
+    // the rounded point) would report it ~0.4 NM away; we report 0.
+    let exact = LatLon {
+        lat: -33.9461,
+        lon: 151.1772,
+    };
+    let body = br#"{"aircraft":[{"hex":"abc123","lat":-33.9461,"lon":151.1772,"alt_baro":1200,"dst":0.42,"dir":45.0}]}"#;
+    let list = parse_response(body, exact).unwrap();
+    assert!(list[0].dist_nm < 1e-6, "{}", list[0].dist_nm);
+}
+
+#[test]
+fn query_radius_covers_the_rounding_error_and_caps_at_250() {
+    assert_eq!(query_radius_nm(10, 2), 11); // +0.42 NM
+    assert_eq!(query_radius_nm(10, 4), 11); // +0.004 NM, still rounded up
+    assert_eq!(query_radius_nm(10, 1), 15); // +4.2 NM
+    assert_eq!(query_radius_nm(249, 2), 250);
+    assert_eq!(query_radius_nm(250, 0), 250);
 }

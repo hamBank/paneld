@@ -14,9 +14,13 @@
 //!
 //! # Privacy
 //! The location is rounded to `location_decimals` before it goes into the
-//! URL, and the rounded value is also what distances are measured from. The
-//! URL and location are never logged above debug level, and transport errors
-//! are logged with their URL stripped.
+//! URL; the request radius grows by the most that rounding can move the point
+//! (see [`query_radius_nm`]) so no aircraft in range is lost. Distance and
+//! bearing are always computed here, from the exact configured location: the
+//! provider's `dst`/`dir` are relative to the rounded point, so they are
+//! ignored. The exact location never leaves the process. The URL and location
+//! are never logged above debug level, and transport errors are logged with
+//! their URL stripped.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -185,16 +189,17 @@ fn parse_one(v: &Json, origin: LatLon) -> Option<Aircraft> {
         emergency: text(v, "emergency").filter(|e| e != "none"),
         lat,
         lon,
-        dist_nm: num(v, "dst").unwrap_or_else(|| haversine_nm(origin, here)),
-        bearing: num(v, "dir")
-            .map(|d| d.rem_euclid(360.0))
-            .unwrap_or_else(|| bearing_deg(origin, here)),
+        // Always ours: the provider's dst/dir are measured from the rounded
+        // query point, `origin` is the exact configured location.
+        dist_nm: haversine_nm(origin, here),
+        bearing: bearing_deg(origin, here),
     })
 }
 
 /// Parse an ADS-B Exchange v2 response (`aircraft` or `ac` array). Aircraft
-/// without a position are skipped. `origin` is the point `dst`/`dir` are
-/// computed from when the provider leaves them out.
+/// without a position are skipped. Distance and bearing are computed from
+/// `origin` (the exact configured location); any `dst`/`dir` in the response
+/// are ignored.
 pub fn parse_response(body: &[u8], origin: LatLon) -> anyhow::Result<Vec<Aircraft>> {
     let root: Json = serde_json::from_slice(body).context("response is not JSON")?;
     let list = match root.get("aircraft").or_else(|| root.get("ac")) {
@@ -252,12 +257,27 @@ fn fmt_coord(v: f64, decimals: u8) -> String {
     format!("{:.*}", usize::from(decimals), round_coord(v, decimals))
 }
 
-/// Fill `{lat}`, `{lon}` and `{radius_nm}`; the location is rounded first.
+/// The radius to ask the provider for: `radius_nm` plus the most that
+/// rounding to `decimals` can move the query point (half a unit in the last
+/// place on both axes; a degree of latitude is 60 NM and a degree of
+/// longitude never more), rounded up and capped at the 250 NM API limit.
+/// Aircraft are then filtered on the exact `radius_nm` from the exact point.
+pub fn query_radius_nm(radius_nm: u32, decimals: u8) -> u32 {
+    let half_unit_deg = 0.5 * 10f64.powi(-i32::from(decimals));
+    let margin_nm = 60.0 * half_unit_deg * std::f64::consts::SQRT_2;
+    ((f64::from(radius_nm) + margin_nm).ceil() as u32).min(250)
+}
+
+/// Fill `{lat}`, `{lon}` and `{radius_nm}`; the location is rounded first
+/// and the radius widened to match ([`query_radius_nm`]).
 pub fn fill_url(cfg: &AircraftConfig) -> String {
     cfg.url
         .replace("{lat}", &fmt_coord(cfg.location.lat, cfg.location_decimals))
         .replace("{lon}", &fmt_coord(cfg.location.lon, cfg.location_decimals))
-        .replace("{radius_nm}", &cfg.radius_nm.to_string())
+        .replace(
+            "{radius_nm}",
+            &query_radius_nm(cfg.radius_nm, cfg.location_decimals).to_string(),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -650,11 +670,11 @@ impl Source for AircraftSource {
                 .context("building HTTP client")?;
             let url = fill_url(&cfg);
             tracing::debug!(%url, "aircraft source url");
-            // Distances are measured from the rounded point: that is what the
-            // provider measured from, and what we are willing to reveal.
+            // Distances are measured from the exact location, locally. Only
+            // the rounded point is ever sent (fill_url).
             let origin = LatLon {
-                lat: round_coord(cfg.location.lat, cfg.location_decimals),
-                lon: round_coord(cfg.location.lon, cfg.location_decimals),
+                lat: cfg.location.lat,
+                lon: cfg.location.lon,
             };
             let filter = Filter {
                 radius_nm: f64::from(cfg.radius_nm),

@@ -335,7 +335,11 @@ mod tests {
             Arc::new(SourceHealth::default()),
             Duration::from_millis(1),
         ));
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        // Wait for the condition, not a fixed time: CI machines can be slow.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while attempts.load(Ordering::Relaxed) < 2 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         let _ = stop.send(true);
         task.await.unwrap();
         assert!(attempts.load(Ordering::Relaxed) >= 2);
