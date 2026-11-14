@@ -141,8 +141,28 @@ Sources (`[sources.<name>]`, each with a `type`) write store keys that widgets a
 |---|---|
 | `static` | Writes fixed values once, e.g. `values = { "demo:temp" = 21.5, "demo:on" = true }`. Useful for laying out scenes. |
 | `aircraft` | Aircraft near a point, from adsb.fi (or any ADS-B Exchange v2 compatible URL, e.g. a local readsb), with routes from adsbdb. Writes `<name>:count`, `<name>:nearest.*` (`callsign`, `registration`, `type`, `desc`, `route`, `origin`, `destination`, `bearing_compass`, `alt_ft`, `speed_kt`, `dist_nm`, `bearing`) and `<name>:list` (JSON), where `<name>` is the source's name: `[sources.aircraft]` gives `aircraft:*`. Fields: `location = { lat, lon }` (required); `url` (template with `{lat}` `{lon}` `{radius_nm}`, default adsb.fi); `location_decimals` (0-6, default 2, about 1 km: the location is rounded to this before it is sent); `radius_nm` (1-250, default 10); `max_altitude_ft` (optional); `include_ground` (default false); `interval_s` (at least 1, default 15); `routes` (default true); `list_len` (1-20, default 5). Nothing in range removes `nearest.*`; a failed poll leaves the old values. |
+| `home_assistant` | Entity states, weather forecasts and rolling series over the HA WebSocket API. See below. |
 
-Home Assistant, MQTT, HTTP polling and Prometheus sources arrive in M3. Keep personal settings (location, entity IDs) in a git-ignored `config/local.toml`.
+MQTT, HTTP polling and Prometheus sources arrive in M3. Keep personal settings (location, entity IDs) in a git-ignored `config/local.toml`.
+
+#### Home Assistant setup
+
+1. In Home Assistant, open your profile, then Security, and create a **long-lived access token**.
+2. Put it in an environment variable, for example `export HA_TOKEN=...` or an `EnvironmentFile=` in the systemd unit. The config only names the variable (`token_env = "HA_TOKEN"`); the token is never read from the config, logged or shown. `paneld run` refuses to start if the variable is not set.
+3. Add the source:
+
+```toml
+[sources.ha]
+type = "home_assistant"
+url = "ws://homeassistant.local:8123/api/websocket"   # ws:// or wss://
+token_env = "HA_TOKEN"
+series = ["sensor.outdoor_temperature"]   # optional: also keep ha:<id>@series
+forecasts = ["weather.home"]              # optional: weather.get_forecasts
+```
+
+Only the entities your scenes use are subscribed (every `ha:<entity_id>…` key in a widget or condition), plus `entities`, `series` and `forecasts`. Optional settings: `entities` (extra entity IDs), `series_points` (288), `forecast_type` (`daily` or `hourly`), `forecast_interval_s` (1800), `forecast_len` (5).
+
+Keys: `ha:<entity_id>` is a number (with the entity's `unit_of_measurement`) or text; `unavailable`/`unknown` remove it. `ha:<entity_id>.<attribute>` holds an attribute (number, text, bool, or JSON for lists and objects). `ha:<entity_id>@series` is a rolling series for sparklines. `ha:<entity_id>.forecast.<n>.<field>` (`n = 0` soonest) and `ha:<entity_id>.forecast` (JSON) hold forecasts. If the connection drops, the last values stay and show as stale; the source reconnects with backoff. Changing the source config or the entities your scenes use takes a restart.
 
 ### Live reload
 

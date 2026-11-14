@@ -367,6 +367,7 @@ fn main() -> anyhow::Result<()> {
 
 fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
     let (cfg, loaded_text) = Config::load_with_text(&config_path)?;
+    paneld::sources::check_environment(&cfg)?;
     let (tx, rx) = frame_channel(cfg.canvas.width, cfg.canvas.height);
     let (reload_tx, reload_rx) = std::sync::mpsc::channel();
     let reload_ctx =
