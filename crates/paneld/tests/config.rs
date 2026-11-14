@@ -856,3 +856,118 @@ fn home_assistant_source_parses_and_validates() {
     ))
     .is_err());
 }
+
+#[test]
+fn http_poll_source_defaults_and_validation() {
+    use paneld::config::{ExtractSpec, SourceConfig};
+    let base = "type = \"http_poll\"\nurl = \"https://example.com/api?k=1\"\n";
+    let cfg = Config::parse(&format!(
+        "{MINIMAL}[sources.w]\n{base}extract = {{ \"w:temp\" = {{ path = \"$.current.temp\", unit = \"C\" }}, \"w:icon\" = \"$.list[0].icon\" }}\nheader_env = {{ Authorization = \"WEATHER_AUTH\" }}\nheaders = {{ Accept = \"application/json\" }}\n"
+    ))
+    .unwrap();
+    let SourceConfig::HttpPoll(c) = &cfg.sources["w"] else {
+        panic!("not http_poll");
+    };
+    assert_eq!((c.interval_s, c.timeout_s), (60.0, 10.0));
+    assert_eq!(
+        c.extract["w:icon"],
+        ExtractSpec::Path("$.list[0].icon".into())
+    );
+    assert_eq!(c.extract["w:temp"].unit(), Some("C"));
+    assert_eq!(c.header_env["Authorization"], "WEATHER_AUTH");
+
+    let ok = "extract = { \"w:t\" = \"$.t\" }\n";
+    for (extra, msg) in [
+        (
+            format!("{base}interval_s = 0.5\n{ok}"),
+            "sources.a: interval_s must be 1 to 86400",
+        ),
+        (
+            format!("{base}timeout_s = 0\n{ok}"),
+            "sources.a: timeout_s must be 1 to 120",
+        ),
+        (base.to_string(), "missing field `extract`"),
+        (
+            format!("{base}extract = {{}}\n"),
+            "extract must list at least one key",
+        ),
+        (
+            format!("{base}extract = {{ nocolon = \"$.t\" }}\n"),
+            "extract key \"nocolon\" is not a valid key",
+        ),
+        (
+            format!("{base}extract = {{ \"w:t\" = \"$.a[\" }}\n"),
+            "extract \"w:t\": invalid path \"$.a[\": column 4",
+        ),
+        (
+            format!("{base}extract = {{ \"w:t\" = \"current.t\" }}\n"),
+            "a path must start with `$`",
+        ),
+        (
+            "type = \"http_poll\"\nurl = \"ftp://x\"\nextract = { \"w:t\" = \"$.t\" }\n".into(),
+            "url must start with http:// or https://",
+        ),
+        (
+            "type = \"http_poll\"\nurl = \"https://u:p@x/\"\nextract = { \"w:t\" = \"$.t\" }\n"
+                .into(),
+            "must not contain user:password@",
+        ),
+        (
+            format!("{base}{ok}headers = {{ Authorization = \"Bearer abc\" }}\n"),
+            "looks like a credential; put it in header_env",
+        ),
+        (
+            format!("{base}{ok}headers = {{ \"X-Api-Key\" = \"abc\" }}\n"),
+            "looks like a credential",
+        ),
+        (
+            format!("{base}{ok}header_env = {{ Authorization = \"Bearer abc\" }}\n"),
+            "must be the NAME of an environment variable",
+        ),
+        (
+            format!("{base}{ok}headers = {{ \"bad name\" = \"x\" }}\n"),
+            "not a valid header name",
+        ),
+        (format!("{base}{ok}bogus = 1\n"), "unknown field `bogus`"),
+    ] {
+        let e = err(&format!("{MINIMAL}[sources.a]\n{extra}"));
+        assert!(e.contains(msg), "{msg}: {e}");
+    }
+}
+
+#[test]
+fn prometheus_source_defaults_and_validation() {
+    use paneld::config::{QuerySpec, SourceConfig};
+    let base = "type = \"prometheus\"\nurl = \"http://prometheus.local:9090\"\n";
+    let cfg = Config::parse(&format!(
+        "{MINIMAL}[sources.prom]\n{base}queries = {{ \"prom:power\" = {{ query = \"sum(power_watts)\", unit = \"W\" }}, \"prom:up\" = \"min(up)\" }}\nrange_queries = {{ \"prom:power@series\" = {{ query = \"sum(power_watts)\", range_s = 3600, step_s = 60 }} }}\nbearer_env = \"PROM_TOKEN\"\n"
+    ))
+    .unwrap();
+    let SourceConfig::Prometheus(c) = &cfg.sources["prom"] else {
+        panic!("not prometheus");
+    };
+    assert_eq!((c.interval_s, c.timeout_s), (15.0, 10.0));
+    assert_eq!(c.queries["prom:up"], QuerySpec::Query("min(up)".into()));
+    assert_eq!(c.queries["prom:power"].unit(), Some("W"));
+    assert_eq!(c.range_queries["prom:power@series"].step_s, 60.0);
+    assert_eq!(c.bearer_env.as_deref(), Some("PROM_TOKEN"));
+
+    let q = "queries = { \"p:v\" = \"up\" }\n";
+    for (extra, msg) in [
+        (base.to_string(), "queries or range_queries must list at least one key"),
+        (format!("{base}interval_s = 0\n{q}"), "interval_s must be 1 to 86400"),
+        (format!("{base}queries = {{ nocolon = \"up\" }}\n"), "queries key \"nocolon\" is not a valid key"),
+        (format!("{base}queries = {{ \"p:v\" = \" \" }}\n"), "the query is empty"),
+        (format!("{base}{q}range_queries = {{ \"p:v\" = {{ query = \"up\", range_s = 60, step_s = 10 }} }}\n"), "is in both queries and range_queries"),
+        (format!("{base}range_queries = {{ \"p:r\" = {{ query = \"up\", range_s = 10, step_s = 60 }} }}\n"), "need 0 < step_s <= range_s"),
+        (format!("{base}range_queries = {{ \"p:r\" = {{ query = \"up\", range_s = 86400, step_s = 1 }} }}\n"), "at most 11000 points"),
+        (format!("{base}range_queries = {{ \"p:r\" = {{ query = \"up\", range_s = 60 }} }}\n"), "missing field `step_s`"),
+        (format!("{base}{q}bearer_env = \"abc def\"\n"), "bearer_env must be the NAME of an environment variable"),
+        (format!("type = \"prometheus\"\nurl = \"http://p/?x=1\"\n{q}"), "no query string"),
+        (format!("type = \"prometheus\"\nurl = \"prometheus.local\"\n{q}"), "url must start with http:// or https://"),
+        (format!("{base}{q}bogus = 1\n"), "unknown field `bogus`"),
+    ] {
+        let e = err(&format!("{MINIMAL}[sources.a]\n{extra}"));
+        assert!(e.contains(msg), "{msg}: {e}");
+    }
+}

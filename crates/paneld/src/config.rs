@@ -70,6 +70,130 @@ pub enum SourceConfig {
     Aircraft(AircraftConfig),
     /// Home Assistant WebSocket API (`sources/ha.rs`).
     HomeAssistant(HaConfig),
+    /// Poll a JSON URL and extract values (`sources/http_poll.rs`).
+    HttpPoll(HttpPollConfig),
+    /// Prometheus instant and range queries (`sources/prometheus.rs`).
+    Prometheus(PromConfig),
+}
+
+/// `type = "http_poll"` (DESIGN.md §6.3).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HttpPollConfig {
+    /// `http://` or `https://` URL returning JSON. May hold a query string,
+    /// but not `user:password@`; secrets belong in `header_env`.
+    pub url: String,
+    /// Seconds between polls, 1 to 86400.
+    #[serde(default = "default_http_poll_interval_s")]
+    pub interval_s: f64,
+    /// Store key → JSON path (`"$.current.temp"`) or `{ path, unit }`.
+    pub extract: std::collections::BTreeMap<String, ExtractSpec>,
+    /// Extra request headers. Values are not secret (they are in the file).
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
+    /// Header name → NAME of the environment variable holding its value
+    /// (`Authorization = "WEATHER_AUTH"`, `"X-Api-Key" = "WEATHER_KEY"`).
+    #[serde(default)]
+    pub header_env: std::collections::BTreeMap<String, String>,
+    /// Request timeout in seconds, 1 to 120.
+    #[serde(default = "default_http_timeout_s")]
+    pub timeout_s: f64,
+}
+
+/// One `extract` entry: a path, or a path with a unit for the number.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum ExtractSpec {
+    Path(String),
+    Full {
+        path: String,
+        #[serde(default)]
+        unit: Option<String>,
+    },
+}
+
+impl ExtractSpec {
+    pub fn path(&self) -> &str {
+        match self {
+            ExtractSpec::Path(p) | ExtractSpec::Full { path: p, .. } => p,
+        }
+    }
+    pub fn unit(&self) -> Option<&str> {
+        match self {
+            ExtractSpec::Path(_) => None,
+            ExtractSpec::Full { unit, .. } => unit.as_deref(),
+        }
+    }
+}
+
+/// `type = "prometheus"` (DESIGN.md §6.4).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromConfig {
+    /// Server base URL, e.g. `http://prometheus.local:9090` (a path prefix
+    /// is allowed; `/api/v1/...` is appended).
+    pub url: String,
+    /// Seconds between rounds of queries, 1 to 86400.
+    #[serde(default = "default_prom_interval_s")]
+    pub interval_s: f64,
+    /// Store key → PromQL instant query, or `{ query, unit }`.
+    #[serde(default)]
+    pub queries: std::collections::BTreeMap<String, QuerySpec>,
+    /// Store key → range query, written as a `Series` (for sparklines).
+    #[serde(default)]
+    pub range_queries: std::collections::BTreeMap<String, RangeQuerySpec>,
+    /// Name of the environment variable holding a bearer token, if the
+    /// server needs one.
+    #[serde(default)]
+    pub bearer_env: Option<String>,
+    /// Per-query request timeout in seconds, 1 to 120.
+    #[serde(default = "default_http_timeout_s")]
+    pub timeout_s: f64,
+}
+
+/// One `queries` entry.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum QuerySpec {
+    Query(String),
+    Full {
+        query: String,
+        #[serde(default)]
+        unit: Option<String>,
+    },
+}
+
+impl QuerySpec {
+    pub fn query(&self) -> &str {
+        match self {
+            QuerySpec::Query(q) | QuerySpec::Full { query: q, .. } => q,
+        }
+    }
+    pub fn unit(&self) -> Option<&str> {
+        match self {
+            QuerySpec::Query(_) => None,
+            QuerySpec::Full { unit, .. } => unit.as_deref(),
+        }
+    }
+}
+
+/// One `range_queries` entry: the last `range_s` seconds at `step_s`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RangeQuerySpec {
+    pub query: String,
+    pub range_s: f64,
+    pub step_s: f64,
+}
+
+fn default_http_poll_interval_s() -> f64 {
+    60.0
+}
+fn default_prom_interval_s() -> f64 {
+    15.0
+}
+fn default_http_timeout_s() -> f64 {
+    10.0
 }
 
 /// `type = "home_assistant"`. The long-lived access token is never in the
@@ -1029,6 +1153,10 @@ impl Config {
             }
             match src {
                 SourceConfig::HomeAssistant(c) => crate::sources::ha::validate(c, &at, &mut errs),
+                SourceConfig::HttpPoll(c) => crate::sources::http_poll::validate(c, &at, &mut errs),
+                SourceConfig::Prometheus(c) => {
+                    crate::sources::prometheus::validate(c, &at, &mut errs)
+                }
                 SourceConfig::Static(c) => {
                     for (key, v) in &c.values {
                         if !crate::condition::is_valid_key(key) {

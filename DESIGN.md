@@ -223,8 +223,14 @@ Initial sources:
      - **Connection:** one connection per run; any failure returns `Err` and the supervisor backs off (1 s to 60 s). `ping` every 30 s; no `pong` within 10 s ends the run. `auth_invalid` is an error naming `token_env`, never the token. Last values stay in the store while down. `paneld run` checks that the `token_env` variable is set at startup.
    - **Weather icons (decided, as built):** a `condition_icons` table on the `value` widget (plus `show_text`), not a separate `weather` widget. The `value` widget already has the icon + text layout, alignment, font, colour and staleness; a `weather` widget would duplicate all of it for one extra lookup. When the value is `Text` and `condition_icons` is set, the icon comes from the table, then from a built-in map (`icons::DEFAULT_CONDITION_ICONS`) of the 15 conditions in the HA developer docs (https://contributors.home-assistant.io/core/entities/weather/, section Conditions; the page was `developers.home-assistant.io/docs/core/entity/weather/` earlier), then falls back to `icon`. Three 12x12 icons were added for it: `snow`, `moon` (`clear-night`) and `fog`. There is no partly-cloudy, hail or storm icon, so `partlycloudy` uses `cloud`, `hail` uses `snow`, `lightning-rainy` uses `bolt` and `exceptional` uses `thermometer`.
 2. **MQTT subscribe**: arbitrary topics → keys, with optional JSON path extraction.
-3. **HTTP poll**: URL + interval + JSON path(s) → keys. Covers weather and generic APIs.
-4. **Prometheus query**: instant queries (and range queries for sparklines) against a Prometheus URL → `Number`/`Series`.
+3. **HTTP poll** (`sources/http_poll.rs`): URL + interval + JSON path(s) → keys. Covers weather and generic APIs. As built:
+   - **Config:** `url`, `interval_s` (>= 1, 60), `extract` (key → `"$.path"` or `{ path, unit }`), `headers`, `header_env` (header name → env var name), `timeout_s` (10). Paths use the shared `extract.rs` syntax and are checked at config load (errors name the column). `headers` rejects credential-looking names (`auth`, `key`, `token`, `cookie`, ...): secrets must use `header_env`. The variables are read when the source is built and `paneld run` checks they are set at start (`check_environment`); values are `HeaderValue::set_sensitive`, so they never appear in `Debug`, logs or errors.
+   - **Writes:** one `apply` batch per successful poll. A path that is missing or `null` in a successful response **removes** its key. A failed poll (transport error, non-2xx, 429, body not JSON) writes nothing, so old values stay.
+   - **Polling:** shared with the aircraft source in `sources/poll.rs`: never faster than `interval_s`; `Retry-After` (seconds form, default 60 s, at most 1 h) on 429; otherwise errors back off `interval * 2^n` capped at 5 min; 8 MiB body cap; errors are logged without the URL (API keys often live in query strings); redirects are followed only to the same host and port, so credentials never travel elsewhere.
+4. **Prometheus query** (`sources/prometheus.rs`): instant queries (and range queries for sparklines) against a Prometheus URL → `Number`/`Series`. Confirmed against https://prometheus.io/docs/prometheus/latest/querying/api/ (`/api/v1/query`, `/api/v1/query_range`, envelope `status`/`data`/`errorType`/`error`, `resultType` `vector`/`scalar`/`matrix`, samples as `[ts, "string"]`, 400/422/503 for errors). As built:
+   - **Config:** `url` (server base, a path prefix is fine), `interval_s` (15), `queries` (key → PromQL or `{ query, unit }`), `range_queries` (key → `{ query, range_s, step_s }`; `step_s <= range_s`, at most 11000 points), `bearer_env`, `timeout_s` (10).
+   - **Instant results:** a scalar gives its value; a vector with one series gives its value; an empty vector, `NaN`/`Inf` or a native histogram removes the key; a vector with several series writes nothing for that key (old value stays), logs a warning naming the key and series count, and counts `ctx.error()`. A 400/422 for one query is handled the same way (the server's `errorType: error` text is logged, capped at 200 chars). **Range:** `Series` from the first series, oldest first, non-finite samples skipped.
+   - **Execution:** all queries of a round run concurrently, at most 4 at once, and everything that succeeded is written in one batch. If every query fails with a transport error, 5xx or 401/403, the whole source backs off; 429 honours `Retry-After`. Backoff and the other polling rules are the same as for HTTP poll (`sources/poll.rs`).
 5. **Clock/system**: time, date, uptime, local CPU temp.
 6. **Media folder**: images/GIFs loaded and scaled to zone size on demand (cached). *(M2 only has what the `image` widget needs: `path` files decoded at config load. The folder source, async loading and `media:` keys arrive in M3.)*
 7. **HTTP push** (via control API, §7): external scripts write keys or raise notifications.
@@ -387,14 +393,16 @@ token_env = "PANELD_HA_TOKEN"
 [sources.prom]
 type = "prometheus"
 url = "http://prometheus.local:9090"
-queries = { "prom:house_power" = "sum(power_watts)" }
+queries = { "prom:house_power" = { query = "sum(power_watts)", unit = "W" } }
+range_queries = { "prom:house_power_hist" = { query = "sum(power_watts)", range_s = 3600, step_s = 60 } }
 interval_s = 10
 
 [sources.weather]
 type = "http_poll"
 url = "https://example/api/forecast"
 interval_s = 600
-extract = { "weather:temp" = "$.current.temp", "weather:icon" = "$.current.icon" }
+extract = { "weather:temp" = { path = "$.current.temp", unit = "C" }, "weather:icon" = "$.current.icon" }
+header_env = { "X-Api-Key" = "WEATHER_API_KEY" }   # header name -> env var NAME
 
 [sources.aircraft]           # §6.1; adsb.fi by default, a local receiver later by changing `url`
 type = "aircraft"
