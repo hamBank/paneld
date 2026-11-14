@@ -12,6 +12,7 @@ pub mod colorlight_sink;
 pub mod condition;
 pub mod config;
 pub mod engine;
+pub mod extract;
 pub mod fonts;
 pub mod format;
 pub mod icons;
