@@ -10,7 +10,15 @@ Architecture, config schema and roadmap are in [`DESIGN.md`](DESIGN.md).
 
 **M1 (hardware) is code-complete, but untested on a real card.** It adds `colorlight-proto` (packet encoding), `colorlight-net` (Linux raw-socket transport, discovery), the Colorlight sink behind `[[output]] type = "colorlight"`, `paneld probe` and `paneld test-pattern --interface`. Bring-up on the Pi follows [`deploy/README.md`](deploy/README.md); the result (firmware version, port mapping, colour order) is still to be recorded, see `DESIGN.md` §15. The sink only works on Linux; other platforms build a stub.
 
-Scene rotation and conditions (M2) are in; more widgets are still to come (M2), data sources (M3), control API and MQTT (M4). See `DESIGN.md` §14.
+**M2 (scenes) is done:**
+- playlist rotation with conditions;
+- `value`, `sparkline` and `image` (PNG/GIF) widgets;
+- BDF fonts with `font_scale`;
+- config hot reload.
+
+**M3 (data) is done:** data sources (`static`, `aircraft` via adsb.fi, `home_assistant`, `mqtt` (plain TCP), `http_poll`, `prometheus`) run under a supervisor and restart on failure. Hot reload restarts only the sources whose config changed. Text widgets take templates like `{ha:sensor.x:.1}°C`, and `value` widgets can map weather conditions to icons.
+
+Next: control API, MQTT discovery, notifications and quiet hours (M4). See `DESIGN.md` §14.
 
 ## Hardware
 
