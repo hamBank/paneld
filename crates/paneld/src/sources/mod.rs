@@ -19,6 +19,7 @@
 
 pub mod aircraft;
 pub mod ha;
+pub mod mqtt;
 pub mod static_values;
 
 use std::collections::BTreeMap;
@@ -50,6 +51,7 @@ pub fn build(name: &str, cfg: &SourceConfig) -> anyhow::Result<Box<dyn Source>> 
         SourceConfig::Static(c) => Ok(Box::new(static_values::StaticSource::new(name, c))),
         SourceConfig::Aircraft(c) => Ok(Box::new(aircraft::AircraftSource::new(name, c))),
         SourceConfig::HomeAssistant(c) => Ok(Box::new(ha::HaSource::new(c)?)),
+        SourceConfig::Mqtt(c) => Ok(Box::new(mqtt::MqttSource::new(name, c)?)),
     }
 }
 
@@ -57,8 +59,18 @@ pub fn build(name: &str, cfg: &SourceConfig) -> anyhow::Result<Box<dyn Source>> 
 /// (a token) that is not set. Names the variable, never a value.
 pub fn check_environment(cfg: &Config) -> anyhow::Result<()> {
     for (name, scfg) in &cfg.sources {
-        if let SourceConfig::HomeAssistant(c) = scfg {
-            ha::read_token(&c.token_env).map_err(|e| anyhow::anyhow!("[sources.{name}]: {e}"))?;
+        match scfg {
+            SourceConfig::HomeAssistant(c) => {
+                ha::read_token(&c.token_env)
+                    .map_err(|e| anyhow::anyhow!("[sources.{name}]: {e}"))?;
+            }
+            SourceConfig::Mqtt(c) => {
+                if let Some(var) = &c.password_env {
+                    mqtt::read_password(var)
+                        .map_err(|e| anyhow::anyhow!("[sources.{name}]: {e}"))?;
+                }
+            }
+            _ => {}
         }
     }
     Ok(())

@@ -51,6 +51,22 @@ grid = true
 # forecast_type = "daily"                    # or "hourly"
 # forecast_interval_s = 1800
 # forecast_len = 5                           # periods written (0 = soonest)
+# MQTT: topics to keys. Plain TCP; the password is read from the environment
+# variable named by password_env. Keys are used as written (quote them); each
+# entry is one exact topic (no + or # wildcards). A topic is a string (the
+# payload is the value: 21.5 is a number, on is text) or a table with a JSON
+# `path` and a `unit`. An empty payload removes the key.
+# [sources.mqtt]
+# type = "mqtt"
+# host = "homeassistant.local"
+# port = 1883                      # default
+# username = "paneld"
+# password_env = "MQTT_PASSWORD"   # needs username
+# client_id = "paneld-mqtt"        # default paneld-<source name>
+# keep_alive_s = 30                # default
+# [sources.mqtt.topics]
+# "home:solar" = "home/power/solar"
+# "home:grid" = { topic = "home/meter", path = "$.power.grid_w", unit = "W" }
 # [sources.demo]
 # type = "static"            # fixed values, written once at start
 # values = { "ha:sensor.outside_temperature" = 21.5 }

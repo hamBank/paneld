@@ -70,6 +70,73 @@ pub enum SourceConfig {
     Aircraft(AircraftConfig),
     /// Home Assistant WebSocket API (`sources/ha.rs`).
     HomeAssistant(HaConfig),
+    /// MQTT topics to store keys (`sources/mqtt.rs`, DESIGN.md §6.2).
+    Mqtt(MqttSourceConfig),
+}
+
+/// `type = "mqtt"`. The password is never in the config: `password_env`
+/// names the environment variable that holds it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MqttSourceConfig {
+    pub host: String,
+    #[serde(default = "default_mqtt_port")]
+    pub port: u16,
+    pub username: Option<String>,
+    /// Name of the environment variable holding the password (needs `username`).
+    pub password_env: Option<String>,
+    /// Defaults to `paneld-<source name>`. Must be unique on the broker.
+    pub client_id: Option<String>,
+    #[serde(default = "default_mqtt_keep_alive_s")]
+    pub keep_alive_s: u64,
+    /// Store key to topic. No wildcards: one key per entry.
+    pub topics: std::collections::BTreeMap<String, MqttTopic>,
+}
+
+fn default_mqtt_port() -> u16 {
+    1883
+}
+fn default_mqtt_keep_alive_s() -> u64 {
+    30
+}
+
+/// A topic to read: a plain string (the payload is the value) or a table.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum MqttTopic {
+    Plain(String),
+    Detailed(MqttTopicSpec),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MqttTopicSpec {
+    pub topic: String,
+    /// JSON path into the payload, e.g. `$.power.w` (see `extract.rs`).
+    pub path: Option<String>,
+    /// Unit attached to number values.
+    pub unit: Option<String>,
+}
+
+impl MqttTopic {
+    pub fn topic(&self) -> &str {
+        match self {
+            MqttTopic::Plain(t) => t,
+            MqttTopic::Detailed(d) => &d.topic,
+        }
+    }
+    pub fn path(&self) -> Option<&str> {
+        match self {
+            MqttTopic::Plain(_) => None,
+            MqttTopic::Detailed(d) => d.path.as_deref(),
+        }
+    }
+    pub fn unit(&self) -> Option<&str> {
+        match self {
+            MqttTopic::Plain(_) => None,
+            MqttTopic::Detailed(d) => d.unit.as_deref(),
+        }
+    }
 }
 
 /// `type = "home_assistant"`. The long-lived access token is never in the
@@ -1029,6 +1096,7 @@ impl Config {
             }
             match src {
                 SourceConfig::HomeAssistant(c) => crate::sources::ha::validate(c, &at, &mut errs),
+                SourceConfig::Mqtt(c) => crate::sources::mqtt::validate(c, &at, &mut errs),
                 SourceConfig::Static(c) => {
                     for (key, v) in &c.values {
                         if !crate::condition::is_valid_key(key) {

@@ -142,8 +142,9 @@ Sources (`[sources.<name>]`, each with a `type`) write store keys that widgets a
 | `static` | Writes fixed values once, e.g. `values = { "demo:temp" = 21.5, "demo:on" = true }`. Useful for laying out scenes. |
 | `aircraft` | Aircraft near a point, from adsb.fi (or any ADS-B Exchange v2 compatible URL, e.g. a local readsb), with routes from adsbdb. Writes `<name>:count`, `<name>:nearest.*` (`callsign`, `registration`, `type`, `desc`, `route`, `origin`, `destination`, `bearing_compass`, `alt_ft`, `speed_kt`, `dist_nm`, `bearing`) and `<name>:list` (JSON), where `<name>` is the source's name: `[sources.aircraft]` gives `aircraft:*`. Fields: `location = { lat, lon }` (required); `url` (template with `{lat}` `{lon}` `{radius_nm}`, default adsb.fi); `location_decimals` (0-6, default 2, about 1 km: the location is rounded to this before it is sent); `radius_nm` (1-250, default 10); `max_altitude_ft` (optional); `include_ground` (default false); `interval_s` (at least 1, default 15); `routes` (default true); `list_len` (1-20, default 5); `route_separator` (default `-`, giving `SYD-AKL`; the built-in fonts have no `→`, so set it only if your font does). Nothing in range removes `nearest.*`; a failed poll leaves the old values. |
 | `home_assistant` | Entity states, weather forecasts and rolling series over the HA WebSocket API. See below. |
+| `mqtt` | Subscribes to MQTT topics and writes their payloads to keys, with optional JSON path extraction. See below. |
 
-MQTT, HTTP polling and Prometheus sources arrive in M3. Keep personal settings (location, entity IDs) in a git-ignored `config/local.toml`.
+HTTP polling and Prometheus sources arrive in M3. Keep personal settings (location, entity IDs) in a git-ignored `config/local.toml`.
 
 #### Home Assistant setup
 
@@ -163,6 +164,33 @@ forecasts = ["weather.home"]              # optional: weather.get_forecasts
 Only the entities your scenes use are subscribed (every `ha:<entity_id>…` key in a widget or condition), plus `entities`, `series` and `forecasts`. Optional settings: `entities` (extra entity IDs), `series_points` (288), `forecast_type` (`daily` or `hourly`), `forecast_interval_s` (1800), `forecast_len` (5).
 
 Keys: `ha:<entity_id>` is a number (with the entity's `unit_of_measurement`) or text; `unavailable`/`unknown` remove it. `ha:<entity_id>.<attribute>` holds an attribute (number, text, bool, or JSON for lists and objects). `ha:<entity_id>@series` is a rolling series for sparklines. `ha:<entity_id>.forecast.<n>.<field>` (`n = 0` soonest) and `ha:<entity_id>.forecast` (JSON) hold forecasts. If the connection drops, the last values stay and show as stale; the source reconnects with backoff. Changing the source config or the entities your scenes use takes a restart.
+
+#### MQTT setup
+
+Subscribe to topics on any MQTT broker (Mosquitto, Home Assistant's add-on, ...). The connection is plain TCP (MQTT over TLS is a follow-up), which is what a broker on a home LAN normally offers.
+
+```toml
+[sources.mqtt]
+type = "mqtt"
+host = "homeassistant.local"
+# port = 1883                      # default
+# username = "paneld"
+# password_env = "MQTT_PASSWORD"   # NAME of the env var holding the password (needs username)
+
+[sources.mqtt.topics]              # store key = topic, or a table
+"home:solar" = "home/power/solar"
+"home:grid" = { topic = "home/meter", path = "$.power.grid_w", unit = "W" }
+```
+
+Each entry maps one store key to one exact topic. Keys look like `source:name` (quote them in TOML) and are used as written. Two keys may share a topic with different paths. Wildcards (`+`, `#`) are not allowed: a wildcard would need a key per matching topic, and keeping one key per entry means the keys are known when the config loads. Other fields: `client_id` (default `paneld-<source name>`; it must be unique on the broker) and `keep_alive_s` (default 30).
+
+Payloads:
+- With `path` (the same `$.a.b[0]` syntax as other sources), the payload must be JSON; the value at the path is stored. A JSON `null` removes the key.
+- Without `path`, JSON is tried first (`21.5` is a number, `true` a bool, an object or array is JSON); otherwise the payload is its UTF-8 text, so `on` is text. Text that looks like a number is a number. `unit` is attached to numbers.
+- Retained messages count as values. An empty payload (a deleted retained message) removes the keys of that topic.
+- A payload that cannot be used (not JSON when `path` is set, path not found, not UTF-8) is logged once per topic, counted as an error and leaves the key unchanged.
+
+The password is read from the environment variable named by `password_env` (`paneld run` refuses to start if it is not set) and is never logged. Subscriptions use QoS 0. If the broker drops, the last values stay and show as stale; the source reconnects with backoff (1 s to 30 s) and subscribes again. Changing the source config takes a restart.
 
 ### Live reload
 
