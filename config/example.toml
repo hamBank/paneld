@@ -32,8 +32,8 @@ grid = true
 # sync_gap_us = 500             # 0..=20000, gap before the display frame
 
 # Data sources (DESIGN.md §6) write store keys that widgets and conditions read.
-# More source types arrive in M3: home_assistant, aircraft, mqtt, http_poll,
-# prometheus. Put personal settings (your location, entity IDs) in a
+# Source types: static, home_assistant, aircraft, http_poll, prometheus (mqtt
+# arrives in M3). Put personal settings (your location, entity IDs) in a
 # git-ignored config/local.toml, never in this file.
 # Home Assistant: create a long-lived token (profile > Security) and put it in
 # the environment variable named by token_env; the token never goes in a file.
@@ -87,6 +87,33 @@ grid = true
 # routes = true              # look up origin/destination on adsbdb
 # list_len = 5               # 1..=20 entries in aircraft:list
 # # url = "http://receiver.local/tar1090/data/aircraft.json"   # a local readsb
+
+# Poll a JSON API (DESIGN.md §6.3). `extract` maps store keys to JSON paths
+# ($.a.b, $.list[0].x, $["odd.key"]) or { path, unit }. A path missing or null
+# in a good response removes its key; a failed poll keeps the old values.
+# Secrets (API keys, Authorization) go in environment variables named by
+# header_env, never in this file; `headers` is for non-secret headers only.
+# Put the URL (an API key may be in its query string) in config/local.toml.
+# [sources.weather]
+# type = "http_poll"
+# url = "https://api.example.com/v1/forecast?city=example"
+# interval_s = 600           # >= 1, default 60
+# timeout_s = 10             # 1..=120
+# extract = { "weather:temp" = { path = "$.current.temp", unit = "C" }, "weather:icon" = "$.current.icon" }
+# headers = { Accept = "application/json" }
+# header_env = { "X-Api-Key" = "WEATHER_API_KEY" }   # header -> env var NAME
+
+# Prometheus (DESIGN.md §6.4). `queries` are instant queries that must give
+# exactly one series (a scalar is fine; an empty result removes the key; more
+# than one series is a warning and the key is left alone, so aggregate with
+# sum()/max()). `range_queries` write a Series for sparklines.
+# [sources.prom]
+# type = "prometheus"
+# url = "http://prometheus.local:9090"
+# interval_s = 15            # >= 1, default 15
+# queries = { "prom:house_power" = { query = "sum(power_watts)", unit = "W" }, "prom:up" = "min(up)" }
+# range_queries = { "prom:power_hist" = { query = "sum(power_watts)", range_s = 3600, step_s = 60 } }
+# # bearer_env = "PROM_TOKEN"   # NAME of an env var holding a bearer token
 
 [http]
 bind = "127.0.0.1:8080"

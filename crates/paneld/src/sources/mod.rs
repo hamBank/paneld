@@ -19,7 +19,10 @@
 
 pub mod aircraft;
 pub mod ha;
+pub mod http_poll;
 pub mod mqtt;
+pub mod poll;
+pub mod prometheus;
 pub mod static_values;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -52,6 +55,8 @@ pub fn build(name: &str, cfg: &SourceConfig) -> anyhow::Result<Box<dyn Source>> 
         SourceConfig::Aircraft(c) => Ok(Box::new(aircraft::AircraftSource::new(name, c))),
         SourceConfig::HomeAssistant(c) => Ok(Box::new(ha::HaSource::new(c)?)),
         SourceConfig::Mqtt(c) => Ok(Box::new(mqtt::MqttSource::new(name, c)?)),
+        SourceConfig::HttpPoll(c) => Ok(Box::new(http_poll::HttpPollSource::new(c)?)),
+        SourceConfig::Prometheus(c) => Ok(Box::new(prometheus::PromSource::new(c)?)),
     }
 }
 
@@ -69,6 +74,11 @@ pub fn check_source_environment(name: &str, scfg: &SourceConfig) -> anyhow::Resu
                 mqtt::read_password(var).map_err(|e| anyhow::anyhow!("[sources.{name}]: {e}"))?;
             }
         }
+        SourceConfig::HttpPoll(c) => {
+            http_poll::check_environment(c).map_err(|e| anyhow::anyhow!("[sources.{name}]: {e}"))?
+        }
+        SourceConfig::Prometheus(c) => prometheus::check_environment(c)
+            .map_err(|e| anyhow::anyhow!("[sources.{name}]: {e}"))?,
         _ => {}
     }
     Ok(())

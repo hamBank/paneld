@@ -31,6 +31,7 @@ use serde_json::{json, Map, Value as Json};
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
 
+use super::poll::{fetch_body, Fetch, Limits};
 use super::{Source, SourceCtx, SourceFuture};
 use crate::config::{AircraftConfig, LatLon};
 use crate::store::{Change, StoreWriter, Value};
@@ -43,7 +44,6 @@ pub const ATTRIBUTION_HTML: &str =
     r#"Aircraft data: <a href="https://adsb.fi" rel="noopener">adsb.fi</a>"#;
 
 const NM_PER_EARTH_RADIUS: f64 = 3440.065;
-const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 const ROUTE_CACHE_CAP: usize = 512;
 
 /// Timing and endpoint knobs that tests override; [`Tuning::from_config`]
@@ -547,12 +547,7 @@ pub fn build_changes(
 // ---------------------------------------------------------------------------
 // Polling
 
-/// Delay after the `failures`-th consecutive error: the interval doubled per
-/// failure, up to `cap` (never below the interval itself).
-pub fn backoff_delay(interval: Duration, failures: u32, cap: Duration) -> Duration {
-    let scaled = interval.saturating_mul(1u32 << failures.min(16));
-    scaled.min(cap).max(interval)
-}
+pub use super::poll::backoff_delay;
 
 enum Poll {
     Ok(Vec<Aircraft>),
@@ -560,44 +555,24 @@ enum Poll {
     Failed(String),
 }
 
-fn parse_retry_after(h: Option<&reqwest::header::HeaderValue>, t: &Tuning) -> Duration {
-    h.and_then(|v| v.to_str().ok())
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(t.retry_after_default)
-        .min(t.retry_after_max)
-}
-
 async fn poll_once(client: &reqwest::Client, url: &str, origin: LatLon, t: &Tuning) -> Poll {
-    let resp = match client.get(url).send().await {
-        Ok(r) => r,
-        // reqwest errors embed the URL, which holds the location.
-        Err(e) => return Poll::Failed(e.without_url().to_string()),
+    let limits = Limits {
+        retry_after_default: t.retry_after_default,
+        retry_after_max: t.retry_after_max,
+        ..Limits::default()
     };
-    let status = resp.status();
-    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-        return Poll::RateLimited(parse_retry_after(
-            resp.headers().get(reqwest::header::RETRY_AFTER),
-            t,
-        ));
-    }
-    if !status.is_success() {
-        return Poll::Failed(format!("HTTP {status}"));
-    }
-    if resp
-        .content_length()
-        .is_some_and(|n| n > MAX_BODY_BYTES as u64)
+    // Transport errors are stripped of their URL, which holds the location.
+    match fetch_body(client.get(url), &limits)
+        .await
+        .reject_as_failure()
     {
-        return Poll::Failed("response too large".into());
-    }
-    let body = match resp.bytes().await {
-        Ok(b) if b.len() <= MAX_BODY_BYTES => b,
-        Ok(_) => return Poll::Failed("response too large".into()),
-        Err(e) => return Poll::Failed(e.without_url().to_string()),
-    };
-    match parse_response(&body, origin) {
-        Ok(list) => Poll::Ok(list),
-        Err(e) => Poll::Failed(format!("{e:#}")),
+        Fetch::Body(body) => match parse_response(&body, origin) {
+            Ok(list) => Poll::Ok(list),
+            Err(e) => Poll::Failed(format!("{e:#}")),
+        },
+        Fetch::RateLimited(d) => Poll::RateLimited(d),
+        Fetch::Failed(m) => Poll::Failed(m),
+        Fetch::Rejected(..) => unreachable!("reject_as_failure"),
     }
 }
 

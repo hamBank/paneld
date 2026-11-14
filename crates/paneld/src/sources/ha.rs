@@ -144,18 +144,31 @@ impl fmt::Debug for Secret {
     }
 }
 
-/// Read the token from the environment variable `var`. The error names the
-/// variable, never a value.
-pub fn read_token(var: &str) -> Result<Secret, String> {
+impl Secret {
+    /// The secret itself, for putting into a request. Never log it.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Read a secret from the environment variable `var`; `what` says what it
+/// should hold (for the error). The error names the variable, never a value.
+pub fn read_secret(var: &str, what: &str) -> Result<Secret, String> {
     match std::env::var(var) {
         Ok(v) if !v.trim().is_empty() => Ok(Secret(v.trim().to_owned())),
         Ok(_) => Err(format!(
-            "environment variable {var} is empty; it must hold a Home Assistant long-lived access token"
+            "environment variable {var} is empty; it must hold {what}"
         )),
         Err(_) => Err(format!(
-            "environment variable {var} is not set; it must hold a Home Assistant long-lived access token"
+            "environment variable {var} is not set; it must hold {what}"
         )),
     }
+}
+
+/// Read the token from the environment variable `var`. The error names the
+/// variable, never a value.
+pub fn read_token(var: &str) -> Result<Secret, String> {
+    read_secret(var, "a Home Assistant long-lived access token")
 }
 
 // ---------------------------------------------------------------------------
