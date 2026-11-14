@@ -409,8 +409,18 @@ fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
         let listener = tokio::net::TcpListener::bind(cfg.http.bind)
             .await
             .with_context(|| format!("binding {}", cfg.http.bind))?;
-        reload::spawn(reload_ctx, reload_tx, reload_stats.clone());
-        let sources = paneld::sources::Supervisor::start(&cfg, &store);
+        let sources = std::sync::Arc::new(tokio::sync::Mutex::new(
+            paneld::sources::Supervisor::start(&cfg, &store),
+        ));
+        reload::spawn(
+            reload_ctx,
+            reload_tx,
+            reload_stats.clone(),
+            Some(reload::SourceReload {
+                supervisor: sources.clone(),
+                store: store.clone(),
+            }),
+        );
         tracing::info!(addr = %cfg.http.bind, "http listening");
         if cfg.preview().is_some() {
             tracing::info!("preview at http://{}/preview", cfg.http.bind);
@@ -419,7 +429,11 @@ fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
             .with_graceful_shutdown(shutdown_signal())
             .await
             .context("http server");
-        sources.stop(std::time::Duration::from_secs(5)).await;
+        sources
+            .lock()
+            .await
+            .stop_all(std::time::Duration::from_secs(5))
+            .await;
         served
     });
 
