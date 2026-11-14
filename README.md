@@ -107,8 +107,9 @@ Sources (`[sources.<name>]`, each with a `type`) write store keys that widgets a
 | `type` | What it does |
 |---|---|
 | `static` | Writes fixed values once, e.g. `values = { "demo:temp" = 21.5, "demo:on" = true }`. Useful for laying out scenes. |
+| `aircraft` | Aircraft near a point, from adsb.fi (or any ADS-B Exchange v2 compatible URL, e.g. a local readsb), with routes from adsbdb. Writes `<name>:count`, `<name>:nearest.*` (`callsign`, `registration`, `type`, `desc`, `route`, `origin`, `destination`, `bearing_compass`, `alt_ft`, `speed_kt`, `dist_nm`, `bearing`) and `<name>:list` (JSON), where `<name>` is the source's name: `[sources.aircraft]` gives `aircraft:*`. Fields: `location = { lat, lon }` (required); `url` (template with `{lat}` `{lon}` `{radius_nm}`, default adsb.fi); `location_decimals` (0-6, default 2, about 1 km: the location is rounded to this before it is sent); `radius_nm` (1-250, default 10); `max_altitude_ft` (optional); `include_ground` (default false); `interval_s` (at least 1, default 15); `routes` (default true); `list_len` (1-20, default 5). Nothing in range removes `nearest.*`; a failed poll leaves the old values. |
 
-Home Assistant, aircraft (adsb.fi), MQTT, HTTP polling and Prometheus sources arrive in M3. Keep personal settings (location, entity IDs) in a git-ignored `config/local.toml`.
+Home Assistant, MQTT, HTTP polling and Prometheus sources arrive in M3. Keep personal settings (location, entity IDs) in a git-ignored `config/local.toml`.
 
 ### Live reload
 
@@ -141,3 +142,7 @@ UPDATE_GOLDEN=1 cargo test -p paneld golden
 ```
 
 Golden images live in `tests/fixtures/golden/` at 1:1 scale. Review any changes before committing. A failing golden test writes `<name>.actual.png` next to the golden for comparison.
+
+## Credits
+
+Aircraft data: [adsb.fi](https://adsb.fi) (the `aircraft` source's default provider; personal, non-commercial use, see its terms). Routes: [adsbdb](https://www.adsbdb.com). The preview page shows the adsb.fi credit whenever an aircraft source is configured.

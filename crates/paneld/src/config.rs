@@ -65,6 +65,68 @@ pub struct Config {
 pub enum SourceConfig {
     /// Fixed values written once (`sources/static_values.rs`).
     Static(StaticSourceConfig),
+    /// Aircraft near a point, from an ADS-B Exchange v2 style API
+    /// (`sources/aircraft.rs`, DESIGN.md §6.1).
+    Aircraft(AircraftConfig),
+}
+
+/// `type = "aircraft"` (DESIGN.md §6.1). Keys are written as
+/// `<source name>:count`, `<source name>:nearest.*` and `<source name>:list`,
+/// so `[sources.aircraft]` gives `aircraft:*`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AircraftConfig {
+    /// URL template; `{lat}`, `{lon}` and `{radius_nm}` are filled in.
+    #[serde(default = "default_aircraft_url")]
+    pub url: String,
+    /// The point to measure from.
+    pub location: LatLon,
+    /// Decimals the location is rounded to before it is sent (and used for
+    /// distances): 2 is about 1 km. 0 to 6.
+    #[serde(default = "default_location_decimals")]
+    pub location_decimals: u8,
+    /// Search radius in nautical miles, 1 to 250.
+    #[serde(default = "default_radius_nm")]
+    pub radius_nm: u32,
+    /// Ignore aircraft above this barometric altitude (feet).
+    #[serde(default)]
+    pub max_altitude_ft: Option<f64>,
+    /// Keep aircraft reporting `alt_baro = "ground"`.
+    #[serde(default)]
+    pub include_ground: bool,
+    /// Seconds between polls, at least 1.
+    #[serde(default = "default_aircraft_interval_s")]
+    pub interval_s: f64,
+    /// Look up routes on adsbdb for the aircraft in the list.
+    #[serde(default = "default_true")]
+    pub routes: bool,
+    /// How many aircraft go into `<name>:list`, 1 to 20.
+    #[serde(default = "default_list_len")]
+    pub list_len: usize,
+}
+
+/// A WGS84 coordinate in degrees.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LatLon {
+    pub lat: f64,
+    pub lon: f64,
+}
+
+fn default_aircraft_url() -> String {
+    "https://opendata.adsb.fi/api/v2/lat/{lat}/lon/{lon}/dist/{radius_nm}".into()
+}
+fn default_location_decimals() -> u8 {
+    2
+}
+fn default_radius_nm() -> u32 {
+    10
+}
+fn default_aircraft_interval_s() -> f64 {
+    15.0
+}
+fn default_list_len() -> usize {
+    5
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -884,6 +946,41 @@ impl Config {
                                 errs.push(format!("{at}: {key:?} must be a finite number"));
                             }
                         }
+                    }
+                }
+                SourceConfig::Aircraft(c) => {
+                    if !(c.location.lat.is_finite() && (-90.0..=90.0).contains(&c.location.lat)) {
+                        errs.push(format!("{at}: location.lat must be between -90 and 90"));
+                    }
+                    if !(c.location.lon.is_finite() && (-180.0..=180.0).contains(&c.location.lon)) {
+                        errs.push(format!("{at}: location.lon must be between -180 and 180"));
+                    }
+                    if c.location_decimals > 6 {
+                        errs.push(format!("{at}: location_decimals must be 0 to 6"));
+                    }
+                    if !(1..=250).contains(&c.radius_nm) {
+                        errs.push(format!(
+                            "{at}: radius_nm must be 1 to 250 (got {})",
+                            c.radius_nm
+                        ));
+                    }
+                    if !(c.interval_s.is_finite() && (1.0..=86_400.0).contains(&c.interval_s)) {
+                        errs.push(format!(
+                            "{at}: interval_s must be 1 to 86400 (got {})",
+                            c.interval_s
+                        ));
+                    }
+                    if !(1..=20).contains(&c.list_len) {
+                        errs.push(format!(
+                            "{at}: list_len must be 1 to 20 (got {})",
+                            c.list_len
+                        ));
+                    }
+                    if c.max_altitude_ft.is_some_and(|a| !a.is_finite()) {
+                        errs.push(format!("{at}: max_altitude_ft must be a finite number"));
+                    }
+                    if !(c.url.starts_with("http://") || c.url.starts_with("https://")) {
+                        errs.push(format!("{at}: url must start with http:// or https://"));
                     }
                 }
             }
