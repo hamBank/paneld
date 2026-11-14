@@ -17,6 +17,7 @@
 //!   config (`*_env`).
 //! - HTTP: use [`http_client`] (one TLS stack for the whole daemon).
 
+pub mod aircraft;
 pub mod static_values;
 
 use std::collections::BTreeMap;
@@ -46,7 +47,22 @@ pub trait Source: Send {
 pub fn build(name: &str, cfg: &SourceConfig) -> anyhow::Result<Box<dyn Source>> {
     match cfg {
         SourceConfig::Static(c) => Ok(Box::new(static_values::StaticSource::new(name, c))),
+        SourceConfig::Aircraft(c) => Ok(Box::new(aircraft::AircraftSource::new(name, c))),
     }
+}
+
+/// HTML credits that data providers' terms require, one per provider in use
+/// (shown on the preview page).
+pub fn attributions(cfg: &Config) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    if cfg
+        .sources
+        .values()
+        .any(|s| matches!(s, SourceConfig::Aircraft(_)))
+    {
+        out.push(aircraft::ATTRIBUTION_HTML);
+    }
+    out
 }
 
 /// Everything a running source gets.

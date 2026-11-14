@@ -38,6 +38,23 @@ grid = true
 # [sources.demo]
 # type = "static"            # fixed values, written once at start
 # values = { "ha:sensor.outside_temperature" = 21.5 }
+#
+# Aircraft overhead (DESIGN.md §6.1): writes aircraft:count, aircraft:nearest.*
+# and aircraft:list (keys use the source's name). adsb.fi is for personal,
+# non-commercial use and is credited on the preview page. This location is
+# Sydney airport; use your own in config/local.toml, never here. It is rounded
+# to location_decimals before it is sent.
+# [sources.aircraft]
+# type = "aircraft"
+# location = { lat = -33.94, lon = 151.18 }
+# location_decimals = 2      # 0..=6; 2 is about 1 km
+# radius_nm = 10             # 1..=250
+# max_altitude_ft = 15000    # optional
+# include_ground = false
+# interval_s = 15            # >= 1; adsb.fi allows 1 request/s
+# routes = true              # look up origin/destination on adsbdb
+# list_len = 5               # 1..=20 entries in aircraft:list
+# # url = "http://receiver.local/tar1090/data/aircraft.json"   # a local readsb
 
 [http]
 bind = "127.0.0.1:8080"

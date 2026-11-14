@@ -276,6 +276,13 @@ list_len = 5               # how many aircraft go into aircraft:list
 - Cache results in memory only: up to 512 callsigns for 12 h, and misses for 1 h. adsbdb's route data may not be copied into other databases, so nothing is persisted.
 - `routes = false` turns lookups off.
 
+**As built (differences and details, 2026-11-14).**
+- *Key prefix:* keys use the source's **name**, so `[sources.aircraft]` writes `aircraft:*` and `[sources.planes]` writes `planes:*`. All keys of one poll, starting with `RemovePrefix("<name>:nearest.")`, go in one `StoreWriter::apply` batch.
+- *Intervals:* the wait is measured from the end of a poll, so polls are never closer than `interval_s`. A 429 waits `max(Retry-After, interval_s)` (default 60 s, at most 1 h). Other errors wait `interval_s * 2^n` for the n-th consecutive failure, capped at 5 min. A failed poll leaves the store untouched and calls `ctx.error()`.
+- *Routes:* lookups never block the poll. A poll publishes positions with whatever routes are cached, then one background task looks up the missing callsigns one at a time. Each finished lookup republishes the last good list from the cache (no request to the provider), unless the latest poll failed, so stale values are never refreshed by it. Lookup errors (network, 5xx, 429) are cached for 60 s, so a flaky adsbdb is not hammered; 404 and unknown callsigns are cached for the 1 h miss time. Callsigns are used only if they are 2 to 8 ASCII letters or digits.
+- *Parsing:* aircraft without `lat`/`lon` are skipped. `alt_geom` is used if `alt_baro` is missing. `emergency = "none"` counts as no emergency. Aircraft with unknown altitude pass `max_altitude_ft`. Distances are measured from the *rounded* location, which is what the provider measures from too.
+- *Tests:* intervals, the backoff cap and the adsbdb base URL are injected (`Tuning`), not config fields, so no config surface was added for tests.
+
 **Privacy.** A radius query has to send a location. We send it rounded to `location_decimals` (default 2, about 1 km), and the exact home coordinates are never logged at info level or above. The committed `config/example.toml` uses a public landmark, never a real home. Taking the location from HA's `zone.home` (`location = "ha:zone.home"`) is a possible follow-up once the HA source exists.
 
 **Handles for a local receiver.** The source depends on one contract, so a local receiver can replace adsb.fi with only a `url` change:

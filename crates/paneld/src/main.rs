@@ -395,7 +395,12 @@ fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
 
     let mut app = Router::new();
     if let Some(p) = cfg.preview() {
-        app = app.merge(preview::router(rx, p, cfg.canvas.fps));
+        app = app.merge(preview::router(
+            rx,
+            p,
+            cfg.canvas.fps,
+            &paneld::sources::attributions(&cfg),
+        ));
     }
 
     let rt = tokio::runtime::Runtime::new()?;

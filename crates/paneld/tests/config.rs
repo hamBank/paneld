@@ -648,7 +648,9 @@ fn sources_parse_and_validate() {
         "{MINIMAL}[sources.demo]\ntype = \"static\"\nvalues = {{ \"demo:t\" = 21.5, \"demo:n\" = 3, \"demo:s\" = \"hi\", \"demo:b\" = false }}\n"
     ))
     .unwrap();
-    let paneld::config::SourceConfig::Static(s) = &cfg.sources["demo"];
+    let paneld::config::SourceConfig::Static(s) = &cfg.sources["demo"] else {
+        panic!("not a static source");
+    };
     use paneld::config::StaticValue;
     assert_eq!(s.values["demo:t"], StaticValue::Number(21.5));
     assert_eq!(s.values["demo:n"], StaticValue::Number(3.0));
@@ -670,6 +672,60 @@ fn sources_parse_and_validate() {
     assert!(e.contains("unknown variant `nope`"), "{e}");
     let e = err(&format!("{MINIMAL}[sources.x]\nvalues = {{}}\n"));
     assert!(e.contains("missing field `type`"), "{e}");
+}
+
+#[test]
+fn aircraft_source_defaults_and_validation() {
+    let cfg = Config::parse(&format!(
+        "{MINIMAL}[sources.aircraft]\ntype = \"aircraft\"\nlocation = {{ lat = -33.94, lon = 151.18 }}\n"
+    ))
+    .unwrap();
+    let paneld::config::SourceConfig::Aircraft(a) = &cfg.sources["aircraft"] else {
+        panic!("not an aircraft source");
+    };
+    assert_eq!(
+        a.url,
+        "https://opendata.adsb.fi/api/v2/lat/{lat}/lon/{lon}/dist/{radius_nm}"
+    );
+    assert_eq!((a.location.lat, a.location.lon), (-33.94, 151.18));
+    assert_eq!(a.location_decimals, 2);
+    assert_eq!(a.radius_nm, 10);
+    assert_eq!(a.max_altitude_ft, None);
+    assert!(!a.include_ground);
+    assert_eq!(a.interval_s, 15.0);
+    assert!(a.routes);
+    assert_eq!(a.list_len, 5);
+
+    let base = "type = \"aircraft\"\nlocation = { lat = -33.94, lon = 151.18 }\n";
+    for (extra, msg) in [
+        (
+            "interval_s = 0.5",
+            "sources.a: interval_s must be 1 to 86400",
+        ),
+        ("radius_nm = 0", "sources.a: radius_nm must be 1 to 250"),
+        ("radius_nm = 251", "sources.a: radius_nm must be 1 to 250"),
+        ("list_len = 0", "sources.a: list_len must be 1 to 20"),
+        ("list_len = 21", "sources.a: list_len must be 1 to 20"),
+        (
+            "location_decimals = 7",
+            "sources.a: location_decimals must be 0 to 6",
+        ),
+        ("url = \"ftp://x\"", "sources.a: url must start with"),
+        ("bogus = 1", "unknown field `bogus`"),
+    ] {
+        let e = err(&format!("{MINIMAL}[sources.a]\n{base}{extra}\n"));
+        assert!(e.contains(msg), "{extra}: {e}");
+    }
+    let e = err(&format!(
+        "{MINIMAL}[sources.a]\ntype = \"aircraft\"\nlocation = {{ lat = 91.0, lon = 181.0 }}\n"
+    ));
+    assert!(e.contains("location.lat must be between -90 and 90"), "{e}");
+    assert!(
+        e.contains("location.lon must be between -180 and 180"),
+        "{e}"
+    );
+    let e = err(&format!("{MINIMAL}[sources.a]\ntype = \"aircraft\"\n"));
+    assert!(e.contains("missing field `location`"), "{e}");
 }
 
 #[test]
