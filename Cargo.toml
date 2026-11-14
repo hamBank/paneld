@@ -1,5 +1,6 @@
 [workspace]
-resolver = "2"
+# "3": pick dependency versions that support `rust-version` (MSRV-aware).
+resolver = "3"
 members = ["crates/colorlight-proto", "crates/colorlight-net", "crates/paneld"]
 
 [workspace.package]

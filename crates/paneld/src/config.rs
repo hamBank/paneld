@@ -47,11 +47,367 @@ pub struct Config {
     pub fonts: Vec<FontConfig>,
     #[serde(default, rename = "scene")]
     pub scenes: Vec<SceneConfig>,
+    /// Data sources by name (`[sources.<name>]`, DESIGN.md §6). Each writes
+    /// store keys; by convention keys start with a prefix naming the kind of
+    /// source (`ha:`, `aircraft:`, `demo:`).
+    #[serde(default)]
+    pub sources: std::collections::BTreeMap<String, SourceConfig>,
     /// Directory relative media and font paths are resolved against: the config file's
     /// directory for [`Config::load`], the working directory for
     /// [`Config::parse`].
     #[serde(skip)]
     pub base_dir: PathBuf,
+}
+
+/// One `[sources.<name>]` entry, selected by `type`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SourceConfig {
+    /// Fixed values written once (`sources/static_values.rs`).
+    Static(StaticSourceConfig),
+    /// Aircraft near a point, from an ADS-B Exchange v2 style API
+    /// (`sources/aircraft.rs`, DESIGN.md §6.1).
+    Aircraft(AircraftConfig),
+    /// Home Assistant WebSocket API (`sources/ha.rs`).
+    HomeAssistant(HaConfig),
+    /// MQTT topics to store keys (`sources/mqtt.rs`, DESIGN.md §6.2).
+    Mqtt(MqttSourceConfig),
+    /// Poll a JSON URL and extract values (`sources/http_poll.rs`).
+    HttpPoll(HttpPollConfig),
+    /// Prometheus instant and range queries (`sources/prometheus.rs`).
+    Prometheus(PromConfig),
+}
+
+/// `type = "http_poll"` (DESIGN.md §6.3).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HttpPollConfig {
+    /// `http://` or `https://` URL returning JSON. May hold a query string,
+    /// but not `user:password@`; secrets belong in `header_env`.
+    pub url: String,
+    /// Seconds between polls, 1 to 86400.
+    #[serde(default = "default_http_poll_interval_s")]
+    pub interval_s: f64,
+    /// Store key → JSON path (`"$.current.temp"`) or `{ path, unit }`.
+    pub extract: std::collections::BTreeMap<String, ExtractSpec>,
+    /// Extra request headers. Values are not secret (they are in the file).
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
+    /// Header name → NAME of the environment variable holding its value
+    /// (`Authorization = "WEATHER_AUTH"`, `"X-Api-Key" = "WEATHER_KEY"`).
+    #[serde(default)]
+    pub header_env: std::collections::BTreeMap<String, String>,
+    /// Request timeout in seconds, 1 to 120.
+    #[serde(default = "default_http_timeout_s")]
+    pub timeout_s: f64,
+}
+
+/// One `extract` entry: a path, or a path with a unit for the number.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum ExtractSpec {
+    Path(String),
+    Full {
+        path: String,
+        #[serde(default)]
+        unit: Option<String>,
+    },
+}
+
+impl ExtractSpec {
+    pub fn path(&self) -> &str {
+        match self {
+            ExtractSpec::Path(p) | ExtractSpec::Full { path: p, .. } => p,
+        }
+    }
+    pub fn unit(&self) -> Option<&str> {
+        match self {
+            ExtractSpec::Path(_) => None,
+            ExtractSpec::Full { unit, .. } => unit.as_deref(),
+        }
+    }
+}
+
+/// `type = "prometheus"` (DESIGN.md §6.4).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromConfig {
+    /// Server base URL, e.g. `http://prometheus.local:9090` (a path prefix
+    /// is allowed; `/api/v1/...` is appended).
+    pub url: String,
+    /// Seconds between rounds of queries, 1 to 86400.
+    #[serde(default = "default_prom_interval_s")]
+    pub interval_s: f64,
+    /// Store key → PromQL instant query, or `{ query, unit }`.
+    #[serde(default)]
+    pub queries: std::collections::BTreeMap<String, QuerySpec>,
+    /// Store key → range query, written as a `Series` (for sparklines).
+    #[serde(default)]
+    pub range_queries: std::collections::BTreeMap<String, RangeQuerySpec>,
+    /// Name of the environment variable holding a bearer token, if the
+    /// server needs one.
+    #[serde(default)]
+    pub bearer_env: Option<String>,
+    /// Per-query request timeout in seconds, 1 to 120.
+    #[serde(default = "default_http_timeout_s")]
+    pub timeout_s: f64,
+}
+
+/// One `queries` entry.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum QuerySpec {
+    Query(String),
+    Full {
+        query: String,
+        #[serde(default)]
+        unit: Option<String>,
+    },
+}
+
+impl QuerySpec {
+    pub fn query(&self) -> &str {
+        match self {
+            QuerySpec::Query(q) | QuerySpec::Full { query: q, .. } => q,
+        }
+    }
+    pub fn unit(&self) -> Option<&str> {
+        match self {
+            QuerySpec::Query(_) => None,
+            QuerySpec::Full { unit, .. } => unit.as_deref(),
+        }
+    }
+}
+
+/// One `range_queries` entry: the last `range_s` seconds at `step_s`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RangeQuerySpec {
+    pub query: String,
+    pub range_s: f64,
+    pub step_s: f64,
+}
+
+fn default_http_poll_interval_s() -> f64 {
+    60.0
+}
+fn default_prom_interval_s() -> f64 {
+    15.0
+}
+fn default_http_timeout_s() -> f64 {
+    10.0
+}
+
+/// `type = "mqtt"`. The password is never in the config: `password_env`
+/// names the environment variable that holds it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MqttSourceConfig {
+    pub host: String,
+    #[serde(default = "default_mqtt_port")]
+    pub port: u16,
+    pub username: Option<String>,
+    /// Name of the environment variable holding the password (needs `username`).
+    pub password_env: Option<String>,
+    /// Defaults to `paneld-<source name>`. Must be unique on the broker.
+    pub client_id: Option<String>,
+    #[serde(default = "default_mqtt_keep_alive_s")]
+    pub keep_alive_s: u64,
+    /// Store key to topic. No wildcards: one key per entry.
+    pub topics: std::collections::BTreeMap<String, MqttTopic>,
+}
+
+fn default_mqtt_port() -> u16 {
+    1883
+}
+fn default_mqtt_keep_alive_s() -> u64 {
+    30
+}
+
+/// A topic to read: a plain string (the payload is the value) or a table.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum MqttTopic {
+    Plain(String),
+    Detailed(MqttTopicSpec),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MqttTopicSpec {
+    pub topic: String,
+    /// JSON path into the payload, e.g. `$.power.w` (see `extract.rs`).
+    pub path: Option<String>,
+    /// Unit attached to number values.
+    pub unit: Option<String>,
+}
+
+impl MqttTopic {
+    pub fn topic(&self) -> &str {
+        match self {
+            MqttTopic::Plain(t) => t,
+            MqttTopic::Detailed(d) => &d.topic,
+        }
+    }
+    pub fn path(&self) -> Option<&str> {
+        match self {
+            MqttTopic::Plain(_) => None,
+            MqttTopic::Detailed(d) => d.path.as_deref(),
+        }
+    }
+    pub fn unit(&self) -> Option<&str> {
+        match self {
+            MqttTopic::Plain(_) => None,
+            MqttTopic::Detailed(d) => d.unit.as_deref(),
+        }
+    }
+}
+
+/// `type = "home_assistant"`. The long-lived access token is never in the
+/// config: `token_env` names the environment variable that holds it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HaConfig {
+    /// WebSocket URL, `ws://` or `wss://`, e.g. `ws://homeassistant.local:8123/api/websocket`.
+    pub url: String,
+    /// Name of the environment variable holding the long-lived access token.
+    pub token_env: String,
+    /// Extra entity IDs to subscribe to, beyond those the scenes use.
+    #[serde(default)]
+    pub entities: Vec<String>,
+    /// Entities that also get a rolling `ha:<entity_id>@series`.
+    #[serde(default)]
+    pub series: Vec<String>,
+    /// Maximum points kept per series.
+    #[serde(default = "default_series_points")]
+    pub series_points: usize,
+    /// Weather entities whose forecast is fetched with `weather.get_forecasts`.
+    #[serde(default)]
+    pub forecasts: Vec<String>,
+    #[serde(default)]
+    pub forecast_type: ForecastType,
+    /// Seconds between forecast fetches.
+    #[serde(default = "default_forecast_interval_s")]
+    pub forecast_interval_s: u64,
+    /// Forecast periods written as `ha:<entity>.forecast.<n>.<field>`.
+    #[serde(default = "default_forecast_len")]
+    pub forecast_len: usize,
+    /// Every store key the scenes read, filled in by the supervisor so the
+    /// source can subscribe only to the entities that are shown. Not part of
+    /// the TOML.
+    #[serde(skip)]
+    pub referenced: std::collections::BTreeSet<String>,
+}
+
+fn default_series_points() -> usize {
+    288
+}
+fn default_forecast_interval_s() -> u64 {
+    1800
+}
+fn default_forecast_len() -> usize {
+    5
+}
+
+/// Which `weather.get_forecasts` `type` to request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForecastType {
+    #[default]
+    Daily,
+    Hourly,
+}
+
+impl ForecastType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ForecastType::Daily => "daily",
+            ForecastType::Hourly => "hourly",
+        }
+    }
+}
+
+/// `type = "aircraft"` (DESIGN.md §6.1). Keys are written as
+/// `<source name>:count`, `<source name>:nearest.*` and `<source name>:list`,
+/// so `[sources.aircraft]` gives `aircraft:*`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AircraftConfig {
+    /// URL template; `{lat}`, `{lon}` and `{radius_nm}` are filled in.
+    #[serde(default = "default_aircraft_url")]
+    pub url: String,
+    /// The point to measure from.
+    pub location: LatLon,
+    /// Decimals the location is rounded to before it is sent (and used for
+    /// distances): 2 is about 1 km. 0 to 6.
+    #[serde(default = "default_location_decimals")]
+    pub location_decimals: u8,
+    /// Search radius in nautical miles, 1 to 250.
+    #[serde(default = "default_radius_nm")]
+    pub radius_nm: u32,
+    /// Ignore aircraft above this barometric altitude (feet).
+    #[serde(default)]
+    pub max_altitude_ft: Option<f64>,
+    /// Keep aircraft reporting `alt_baro = "ground"`.
+    #[serde(default)]
+    pub include_ground: bool,
+    /// Seconds between polls, at least 1.
+    #[serde(default = "default_aircraft_interval_s")]
+    pub interval_s: f64,
+    /// Look up routes on adsbdb for the aircraft in the list.
+    #[serde(default = "default_true")]
+    pub routes: bool,
+    /// How many aircraft go into `<name>:list`, 1 to 20.
+    #[serde(default = "default_list_len")]
+    pub list_len: usize,
+    /// Text between origin and destination in `route` (`SYD-AKL`). ASCII by
+    /// default: the built-in fonts are ISO-8859-1 and have no `→`; set
+    /// `"→"` if your font has it. At most 8 characters.
+    #[serde(default = "default_route_separator")]
+    pub route_separator: String,
+}
+
+/// A WGS84 coordinate in degrees.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LatLon {
+    pub lat: f64,
+    pub lon: f64,
+}
+
+fn default_aircraft_url() -> String {
+    "https://opendata.adsb.fi/api/v2/lat/{lat}/lon/{lon}/dist/{radius_nm}".into()
+}
+fn default_location_decimals() -> u8 {
+    2
+}
+fn default_radius_nm() -> u32 {
+    10
+}
+fn default_aircraft_interval_s() -> f64 {
+    15.0
+}
+fn default_route_separator() -> String {
+    "-".into()
+}
+fn default_list_len() -> usize {
+    5
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StaticSourceConfig {
+    /// Store key → value, e.g. `{ "demo:temp" = 21.5, "demo:on" = true }`.
+    pub values: std::collections::BTreeMap<String, StaticValue>,
+}
+
+/// A TOML scalar for the static source.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum StaticValue {
+    Bool(bool),
+    Number(f64),
+    Text(String),
 }
 
 /// A BDF font file made available under a name (`[[font]]`).
@@ -370,6 +726,9 @@ fn default_clock_format() -> String {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TextConfig {
+    /// Literal text, or a template with `{source:name}` / `{source:name:spec}`
+    /// placeholders filled from the store (see `template.rs`). `{{` and `}}`
+    /// are literal braces.
     pub text: String,
     #[serde(default = "default_font")]
     pub font: String,
@@ -427,6 +786,18 @@ pub struct ValueConfig {
     /// Show the placeholder when the value is older than this. Default: never.
     #[serde(default)]
     pub stale_after_s: Option<f64>,
+    /// Turns on condition icons: when the stored value is `Text` (a weather
+    /// condition such as `rainy`), the icon is looked up here by that text,
+    /// then in the built-in Home Assistant map (`icons::DEFAULT_CONDITION_ICONS`),
+    /// and the text itself is shown. An entry maps a text to an icon name.
+    /// `condition_icons = {}` uses just the built-in map. `icon` is the
+    /// fallback for a text that is in neither.
+    #[serde(default)]
+    pub condition_icons: Option<std::collections::BTreeMap<String, String>>,
+    /// With `condition_icons`: show the text beside the icon (default), or
+    /// only the icon when one was found.
+    #[serde(default = "default_true")]
+    pub show_text: bool,
 }
 
 fn default_value_format() -> String {
@@ -711,6 +1082,41 @@ impl Config {
         })
     }
 
+    /// Every store key the scenes read: widget `key`s and the keys in scene
+    /// conditions. Sources use it to subscribe only to what is shown (e.g.
+    /// the Home Assistant source's entity IDs). Includes the keys of text
+    /// templates.
+    pub fn referenced_keys(&self) -> std::collections::BTreeSet<String> {
+        let mut keys = std::collections::BTreeSet::new();
+        for s in &self.scenes {
+            if let Some(c) = s
+                .condition
+                .as_deref()
+                .and_then(|c| crate::condition::Condition::parse(c).ok())
+            {
+                keys.extend(c.keys().into_iter().map(str::to_owned));
+            }
+            for z in &s.zones {
+                match &z.widget {
+                    WidgetConfig::Value(v) => {
+                        keys.insert(v.key.clone());
+                    }
+                    WidgetConfig::Sparkline(sp) => {
+                        keys.insert(sp.key.clone());
+                    }
+                    WidgetConfig::Image(i) => keys.extend(i.key.clone()),
+                    WidgetConfig::Text(t) => {
+                        if let Ok(t) = crate::template::Template::parse(&t.text) {
+                            keys.extend(t.keys().map(str::to_owned));
+                        }
+                    }
+                    WidgetConfig::Clock(_) => {}
+                }
+            }
+        }
+        keys
+    }
+
     pub fn validate(&self) -> Result<(), ConfigErrors> {
         let mut errs = Vec::new();
         let c = &self.canvas;
@@ -801,6 +1207,81 @@ impl Config {
             errs.push("at least one [[scene]] is required".into());
         }
         let mut names = HashSet::new();
+        for (name, src) in &self.sources {
+            let at = format!("sources.{name}");
+            if name.is_empty()
+                || !name
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+            {
+                errs.push(format!(
+                    "{at}: source names may only use letters, digits, '_' and '-'"
+                ));
+            }
+            match src {
+                SourceConfig::HomeAssistant(c) => crate::sources::ha::validate(c, &at, &mut errs),
+                SourceConfig::Mqtt(c) => crate::sources::mqtt::validate(c, &at, &mut errs),
+                SourceConfig::HttpPoll(c) => crate::sources::http_poll::validate(c, &at, &mut errs),
+                SourceConfig::Prometheus(c) => {
+                    crate::sources::prometheus::validate(c, &at, &mut errs)
+                }
+                SourceConfig::Static(c) => {
+                    for (key, v) in &c.values {
+                        if !crate::condition::is_valid_key(key) {
+                            errs.push(format!(
+                                "{at}: {key:?} is not a valid key; keys look like `source:name`"
+                            ));
+                        }
+                        if let StaticValue::Number(n) = v {
+                            if !n.is_finite() {
+                                errs.push(format!("{at}: {key:?} must be a finite number"));
+                            }
+                        }
+                    }
+                }
+                SourceConfig::Aircraft(c) => {
+                    if !(c.location.lat.is_finite() && (-90.0..=90.0).contains(&c.location.lat)) {
+                        errs.push(format!("{at}: location.lat must be between -90 and 90"));
+                    }
+                    if !(c.location.lon.is_finite() && (-180.0..=180.0).contains(&c.location.lon)) {
+                        errs.push(format!("{at}: location.lon must be between -180 and 180"));
+                    }
+                    if c.location_decimals > 6 {
+                        errs.push(format!("{at}: location_decimals must be 0 to 6"));
+                    }
+                    if !(1..=250).contains(&c.radius_nm) {
+                        errs.push(format!(
+                            "{at}: radius_nm must be 1 to 250 (got {})",
+                            c.radius_nm
+                        ));
+                    }
+                    if !(c.interval_s.is_finite() && (1.0..=86_400.0).contains(&c.interval_s)) {
+                        errs.push(format!(
+                            "{at}: interval_s must be 1 to 86400 (got {})",
+                            c.interval_s
+                        ));
+                    }
+                    if c.route_separator.chars().count() > 8 {
+                        errs.push(format!(
+                            "{at}: route_separator must be at most 8 characters"
+                        ));
+                    }
+                    if !(1..=20).contains(&c.list_len) {
+                        errs.push(format!(
+                            "{at}: list_len must be 1 to 20 (got {})",
+                            c.list_len
+                        ));
+                    }
+                    if c.max_altitude_ft.is_some_and(|a| !a.is_finite()) {
+                        errs.push(format!("{at}: max_altitude_ft must be a finite number"));
+                    }
+                    if !(c.url.starts_with("http://") || c.url.starts_with("https://")) {
+                        errs.push(format!("{at}: url must start with http:// or https://"));
+                    }
+                }
+            }
+        }
+
         for s in &self.scenes {
             if s.name.trim().is_empty() {
                 errs.push("scene: name must not be empty".into());
@@ -860,6 +1341,23 @@ fn validate_value(v: &ValueConfig, at: &str, errs: &mut Vec<String>) {
                 icons::known_names()
             ));
         }
+    }
+    if let Some(map) = &v.condition_icons {
+        for (cond, icon) in map {
+            if cond.trim().is_empty() {
+                errs.push(format!("{at} value: condition_icons has an empty key"));
+            }
+            if icons::lookup(icon).is_none() {
+                errs.push(format!(
+                    "{at} value: condition_icons[{cond:?}]: unknown icon {icon:?} (known: {})",
+                    icons::known_names()
+                ));
+            }
+        }
+    } else if !v.show_text {
+        errs.push(format!(
+            "{at} value: show_text = false needs condition_icons (use condition_icons = {{}} for the built-in map)"
+        ));
     }
     let mut seen: Vec<f64> = Vec::new();
     for (i, t) in v.thresholds.iter().enumerate() {
@@ -949,6 +1447,9 @@ fn validate_widget(w: &WidgetConfig, at: &str, font_names: &[&str], errs: &mut V
             (&c.font, c.font_scale)
         }
         WidgetConfig::Text(t) => {
+            if let Err(e) = crate::template::Template::parse(&t.text) {
+                errs.push(format!("{at} text: invalid template {:?}: {e}", t.text));
+            }
             if let Some(v) = t.scroll_px_per_s {
                 if !(v.is_finite() && v > 0.0) {
                     errs.push(format!("{at} text: scroll_px_per_s must be > 0 (got {v})"));

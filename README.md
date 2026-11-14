@@ -10,7 +10,15 @@ Architecture, config schema and roadmap are in [`DESIGN.md`](DESIGN.md).
 
 **M1 (hardware) is code-complete, but untested on a real card.** It adds `colorlight-proto` (packet encoding), `colorlight-net` (Linux raw-socket transport, discovery), the Colorlight sink behind `[[output]] type = "colorlight"`, `paneld probe` and `paneld test-pattern --interface`. Bring-up on the Pi follows [`deploy/README.md`](deploy/README.md); the result (firmware version, port mapping, colour order) is still to be recorded, see `DESIGN.md` §15. The sink only works on Linux; other platforms build a stub.
 
-Scene rotation and conditions (M2) are in; more widgets are still to come (M2), data sources (M3), control API and MQTT (M4). See `DESIGN.md` §14.
+**M2 (scenes) is done:**
+- playlist rotation with conditions;
+- `value`, `sparkline` and `image` (PNG/GIF) widgets;
+- BDF fonts with `font_scale`;
+- config hot reload.
+
+**M3 (data) is done:** data sources (`static`, `aircraft` via adsb.fi, `home_assistant`, `mqtt` (plain TCP), `http_poll`, `prometheus`) run under a supervisor and restart on failure. Hot reload restarts only the sources whose config changed. Text widgets take templates like `{ha:sensor.x:.1}°C`, and `value` widgets can map weather conditions to icons.
+
+Next: control API, MQTT discovery, notifications and quiet hours (M4). See `DESIGN.md` §14.
 
 ## Hardware
 
@@ -63,7 +71,7 @@ See [`config/example.toml`](config/example.toml). Unknown keys are rejected, and
 
 Widgets:
 - `clock`: `format` (strftime, default `%H:%M`), `font`, `font_scale`, `color`, `align`
-- `text`: `text`, `font`, `font_scale`, `color`, `align` (`left`/`center`/`right`), `scroll_px_per_s` (scrolls right to left when set)
+- `text`: `text`, `font`, `font_scale`, `color`, `align` (`left`/`center`/`right`), `scroll_px_per_s` (scrolls right to left when set). `text` may be a template, see Text templates below.
 - `image`: a PNG or GIF scaled into the zone. Set exactly one of `path` (relative to the config file's directory; read and decoded when the config loads, so a bad file is a config error naming it) or `key` (a store key holding an image, filled by sources from M3). Options: `fit` (`contain` default, `cover`, `stretch`, `none`), `align` (`center` default, `top`, `bottom`, `left`, `right`, `top_left`, `top_right`, `bottom_left`, `bottom_right`), `smooth` (average pixels when shrinking, good for photos; default off, which keeps pixel art sharp), `loop` (GIF: default true, false stops on the last frame). Transparency blends over the zone's `background`. GIF frames follow the scene's elapsed time; frame delays under 20 ms are treated as 100 ms. Images are limited to 4096 px per side and 16 MiB per file.
 
 - `value`: shows a number from the store (`Value::Number`).
@@ -71,7 +79,8 @@ Widgets:
   - `format` has exactly one placeholder: `{}` (plain), `{:.N}` (N decimals), `{:>W.N}` / `{:<W.N}` (padded to width W, N optional). `{{` and `}}` are literal braces. Anything else is a config error. Examples: `"{:.1}°"`, `"{:.0} W"`, `"[{:>6.1}]"`.
   - `unit` is appended verbatim after the formatted number (include the space yourself: `unit = " W"`). The unit stored with the value is ignored.
   - `thresholds = [{ above = 25.0, color = "#ff4000" }, …]`: the value takes the colour of the highest `above` it is strictly greater than, else `color`. Any order, `above` values must be unique.
-  - `icon`: one of `thermometer`, `droplet`, `bolt`, `sun`, `cloud`, `rain`, `home`, `wind` (12x12, drawn left of the text in the text colour).
+  - `icon`: one of `thermometer`, `droplet`, `bolt`, `sun`, `cloud`, `rain`, `home`, `wind`, `snow`, `moon`, `fog` (12x12, drawn left of the text in the text colour).
+  - `condition_icons` (optional table) and `show_text` (default true): weather condition icons, see below.
   - Placeholder: `--` in dim grey (`#505050`, icon too) when the key is missing, the value is not a finite number (text, bool, series), or it is older than `stale_after_s` at the frame's time. Without `stale_after_s` a value never goes stale.
 - `sparkline`: a line graph of a `Value::Series`, newest point at the right edge.
   - `key` (required), `color` (default white), `fill` (`true` = dim version of `color`, or a `"#rrggbb"` colour; default none), `min` / `max` (optional fixed scale; each end not given comes from the data), `points` (most recent points to show, at least 2; default the zone width).
@@ -87,6 +96,38 @@ Widgets:
 - BDF support covers the common subset (`FONTBOUNDINGBOX`, `FONT_ASCENT`/`FONT_DESCENT`, `ENCODING`, `DWIDTH`, `BBX`, `BITMAP`), including proportional widths. `ENCODING` is read as a Unicode code point. A character the font lacks is drawn as `?` if the font has one, otherwise it leaves a blank of the font's widest-cell width. Built-in fonts also show `?`.
 - Layout is the same for every font: the line box (`ascent + descent` for BDF, the cell height for built-ins, times `font_scale`) is centred vertically in the zone, and alignment uses the measured text width.
 
+### Text templates
+
+A `text` widget's `text` is literal text with placeholders filled from the store, e.g. `"{ha:sensor.outdoor_temperature:.1}°"` or `"{aircraft:nearest.callsign} {aircraft:nearest.route}"`.
+
+- `{key}` or `{key:spec}`. `key` is `source:name` (`ha:sensor.outdoor_temperature`); the name may contain letters, digits, `_`, `.`, `-` and `@`. `:` also starts the spec, so the split is positional: the first `:` ends the source prefix, the name runs to the second `:`, and everything after the second `:` is the spec. A key needs its source prefix; no whitespace inside the braces.
+- `spec` is the number format used by `value`: `.N` decimals, `>W` / `<W` / `W` width (right-aligned unless `<`), e.g. `{ha:sensor.power:>6.0}`. Default `{}`.
+- Numbers use the spec. Text is inserted as is (width pads it, `.N` truncates it to N characters). Booleans are `on` / `off`. A missing key, a non-finite number or a series, image or JSON value renders as `--` (padded to the width).
+- `{{` and `}}` are literal braces. Text without any braces is plain text. A template error is a config error naming the scene, the zone and the column.
+- Alignment and scrolling use the rendered width, so they follow the values as they change. The template is parsed once, and only re-rendered on frames where a value it shows has changed.
+- Every key in a template is subscribed by the sources like any other referenced key. `clock` formats are strftime and take no templates.
+
+### Weather condition icons
+
+Give a `value` widget a `condition_icons` table and it shows a `Text` value (such as a Home Assistant `weather.*` entity's state) with an icon chosen from it:
+
+```toml
+widget = { type = "value", key = "ha:weather.home", condition_icons = {}, font = "9x15" }
+widget = { type = "value", key = "ha:weather.home", condition_icons = { rainy = "droplet" }, show_text = false, color = "#ffd000" }
+```
+
+The condition is looked up in `condition_icons` first (condition text to icon name), then in the built-in map of Home Assistant's documented conditions, so `condition_icons = {}` means "the built-in map only":
+
+| condition | icon | condition | icon |
+|---|---|---|---|
+| `sunny` | `sun` | `clear-night` | `moon` |
+| `cloudy`, `partlycloudy` | `cloud` | `fog` | `fog` |
+| `rainy`, `pouring` | `rain` | `snowy`, `snowy-rainy`, `hail` | `snow` |
+| `lightning`, `lightning-rainy` | `bolt` | `windy`, `windy-variant` | `wind` |
+| `exceptional` | `thermometer` | | |
+
+The text itself is shown beside the icon; `show_text = false` shows only the icon (a condition with no icon still shows its text). `icon` is used for texts that are in neither map. Without `condition_icons` a `Text` value shows `--`, as before. `stale_after_s` applies as usual. `show_text = false` without `condition_icons` is a config error.
+
 ### Playlist and conditions
 
 `run` rotates through the scenes in config order, each for its `duration_s`, skipping scenes whose `condition` is false. Scene changes are logged at info level. `run --scene NAME` shows only that scene, ignoring its condition, so you can check a layout before its data exists. If no scene is eligible the panel goes black, and that is logged once per transition. A scene whose condition turns false while it is on screen is left immediately. If the render loop stalls, the playlist moves at most one scene per frame and never catches up on missed time. `render --scene NAME` is unchanged: one frame of one scene, conditions ignored.
@@ -100,15 +141,76 @@ A `condition` is a small expression over store keys:
 
 Conditions are parsed when the config loads; errors name the scene and the expression.
 
+### Data sources
+
+Sources (`[sources.<name>]`, each with a `type`) write store keys that widgets and conditions read. They run in the background and are restarted with backoff if they fail. The render loop never waits on them.
+
+| `type` | What it does |
+|---|---|
+| `static` | Writes fixed values once, e.g. `values = { "demo:temp" = 21.5, "demo:on" = true }`. Useful for laying out scenes. |
+| `aircraft` | Aircraft near a point, from adsb.fi (or any ADS-B Exchange v2 compatible URL, e.g. a local readsb), with routes from adsbdb. Writes `<name>:count`, `<name>:nearest.*` (`callsign`, `registration`, `type`, `desc`, `route`, `origin`, `destination`, `bearing_compass`, `alt_ft`, `speed_kt`, `dist_nm`, `bearing`) and `<name>:list` (JSON), where `<name>` is the source's name: `[sources.aircraft]` gives `aircraft:*`. Fields: `location = { lat, lon }` (required); `url` (template with `{lat}` `{lon}` `{radius_nm}`, default adsb.fi); `location_decimals` (0-6, default 2, about 1 km: the location is rounded to this before it is sent); `radius_nm` (1-250, default 10); `max_altitude_ft` (optional); `include_ground` (default false); `interval_s` (at least 1, default 15); `routes` (default true); `list_len` (1-20, default 5); `route_separator` (default `-`, giving `SYD-AKL`; the built-in fonts have no `→`, so set it only if your font does). Nothing in range removes `nearest.*`; a failed poll leaves the old values. |
+| `http_poll` | Fetches a JSON URL and writes values picked out by JSON paths. Fields: `url` (`http(s)://`, no `user:pass@`; an API key in the query string is fine and is never logged); `interval_s` (at least 1, default 60); `extract` (required; store key to a path like `$.current.temp`, `$.list[0].main.t` or `$["odd.key"]`, or `{ path = "...", unit = "C" }`); `headers` (non-secret request headers); `header_env` (header name to the **name** of an environment variable holding its value, for `Authorization` or API keys; the paneld run fails at start if one is unset); `timeout_s` (1-120, default 10). Numbers and numeric strings become numbers, booleans and strings stay, arrays and objects become JSON. All keys are written in one batch per poll. A path that is missing or `null` in a successful response **removes** its key; a failed poll (error, non-2xx, 429, not JSON) keeps the old values. 429 honours `Retry-After`; errors back off exponentially up to 5 minutes; redirects are followed only within the same host. |
+| `prometheus` | PromQL against a Prometheus server (`/api/v1/query`, `/api/v1/query_range`). Fields: `url` (server base, e.g. `http://prometheus.local:9090`); `interval_s` (at least 1, default 15); `queries` (store key to an instant query, or `{ query = "...", unit = "W" }`); `range_queries` (store key to `{ query, range_s, step_s }`, written as a `Series` of the last `range_s` seconds for sparklines; at most 11000 points); `bearer_env` (name of an environment variable holding a bearer token); `timeout_s` (1-120, default 10). An instant query must give one number: a scalar, or a vector with exactly one series. An empty vector or `NaN`/`Inf` removes the key; a vector with several series writes nothing for that key, logs a warning naming the key and the series count, and counts a source error (aggregate with `sum()` or `max()`). A range query uses the first series. Up to 4 queries run at once and all results go in one batch. Backoff and `Retry-After` as for `http_poll`. |
+| `home_assistant` | Entity states, weather forecasts and rolling series over the HA WebSocket API. See below. |
+| `mqtt` | Subscribes to MQTT topics and writes their payloads to keys, with optional JSON path extraction. See below. |
+
+Keep personal settings (location, entity IDs) in a git-ignored `config/local.toml`.
+
+#### Home Assistant setup
+
+1. In Home Assistant, open your profile, then Security, and create a **long-lived access token**.
+2. Put it in an environment variable, for example `export HA_TOKEN=...` or an `EnvironmentFile=` in the systemd unit. The config only names the variable (`token_env = "HA_TOKEN"`); the token is never read from the config, logged or shown. `paneld run` refuses to start if the variable is not set.
+3. Add the source:
+
+```toml
+[sources.ha]
+type = "home_assistant"
+url = "ws://homeassistant.local:8123/api/websocket"   # ws:// or wss://
+token_env = "HA_TOKEN"
+series = ["sensor.outdoor_temperature"]   # optional: also keep ha:<id>@series
+forecasts = ["weather.home"]              # optional: weather.get_forecasts
+```
+
+Only the entities your scenes use are subscribed (every `ha:<entity_id>…` key in a widget or condition), plus `entities`, `series` and `forecasts`. Optional settings: `entities` (extra entity IDs), `series_points` (288), `forecast_type` (`daily` or `hourly`), `forecast_interval_s` (1800), `forecast_len` (5).
+
+Keys: `ha:<entity_id>` is a number (with the entity's `unit_of_measurement`) or text; `unavailable`/`unknown` remove it. `ha:<entity_id>.<attribute>` holds an attribute (number, text, bool, or JSON for lists and objects). `ha:<entity_id>@series` is a rolling series for sparklines. `ha:<entity_id>.forecast.<n>.<field>` (`n = 0` soonest) and `ha:<entity_id>.forecast` (JSON) hold forecasts. If the connection drops, the last values stay and show as stale; the source reconnects with backoff. Changing the source config or the entities your scenes use restarts just this source on reload.
+
+#### MQTT setup
+
+Subscribe to topics on any MQTT broker (Mosquitto, Home Assistant's add-on, ...). The connection is plain TCP (MQTT over TLS is a follow-up), which is what a broker on a home LAN normally offers.
+
+```toml
+[sources.mqtt]
+type = "mqtt"
+host = "homeassistant.local"
+# port = 1883                      # default
+# username = "paneld"
+# password_env = "MQTT_PASSWORD"   # NAME of the env var holding the password (needs username)
+
+[sources.mqtt.topics]              # store key = topic, or a table
+"home:solar" = "home/power/solar"
+"home:grid" = { topic = "home/meter", path = "$.power.grid_w", unit = "W" }
+```
+
+Each entry maps one store key to one exact topic. Keys look like `source:name` (quote them in TOML) and are used as written. Two keys may share a topic with different paths. Wildcards (`+`, `#`) are not allowed: a wildcard would need a key per matching topic, and keeping one key per entry means the keys are known when the config loads. Other fields: `client_id` (default `paneld-<source name>`; it must be unique on the broker) and `keep_alive_s` (default 30).
+
+Payloads:
+- With `path` (the same `$.a.b[0]` syntax as other sources), the payload must be JSON; the value at the path is stored. A JSON `null` removes the key.
+- Without `path`, JSON is tried first (`21.5` is a number, `true` a bool, an object or array is JSON); otherwise the payload is its UTF-8 text, so `on` is text. Text that looks like a number is a number. `unit` is attached to numbers.
+- Retained messages count as values. An empty payload (a deleted retained message) removes the keys of that topic.
+- A payload that cannot be used (not JSON when `path` is set, path not found, not UTF-8) is logged once per topic, counted as an error and leaves the key unchanged.
+
+The password is read from the environment variable named by `password_env` (`paneld run` refuses to start if it is not set) and is never logged. Subscriptions use QoS 0. If the broker drops, the last values stay and show as stale; the source reconnects with backoff (1 s to 30 s) and subscribes again. Changing the source config takes a restart.
+
 ### Live reload
 
 `paneld run` picks up edits to the config file without a restart. The file is polled once a second; a change is applied once the file has had the same new content on two consecutive polls (so a half-written save is not parsed, and touching the file without changing it does nothing), which means a reload takes about two seconds. On unix, `kill -HUP <pid>` reloads immediately. Editors that save in place or by rename-and-replace both work. The new config is fully parsed, validated and prepared (including decoding images) off the render thread, then swapped in between two frames; the playlist restarts at its first eligible scene and widget state (scroll position, GIF frame) starts over.
 
-- **Applied live:** scenes, zones, widgets, conditions, the playlist and `duration_s`.
+- **Applied live:** scenes, zones, widgets, conditions, the playlist and `duration_s`, and `[sources]`. Only the sources whose config changed are restarted; the others keep running. Adding, removing or editing a `[sources.<name>]` table acts on that source alone, and so does a scene edit that makes it read different entities (for Home Assistant: a scene that starts showing a new `ha:` entity restarts the Home Assistant source). A removed source's values are cleared. A restarted source's values stay on screen until it writes again; keys it no longer produces are then removed. If a changed or added source needs an environment variable that is not set (a token), it is not started, the old one keeps running, and the reload counts an error; the scene changes still apply.
 - **Needs a restart:** `canvas.fps`, `[http]`, and every `[[output]]` (the preview and the Colorlight settings gamma, brightness, white point, colour order, sync gap and interface). If these differ from the running values, a warning names them and the scene and playlist changes are still applied.
 - **Rejected:** a changed `canvas` width or height, since scenes laid out for a new size would not fit the running canvas. Restart to resize.
 - **Errors never take the panel down.** A parse or validation error, an unreadable image, a canvas size change, or (with `run --scene X`) a config that no longer has scene `X` is logged with the full message, counted in `reload_errors`, and the old config keeps running. Fix the file and the next change is picked up. With `--scene X`, scene `X` stays on screen across reloads.
-- **Limitations:** image files referenced by the config are not watched; after replacing one, make any edit to the config or send SIGHUP. Sources are not restarted on reload (that arrives with M3).
+- **Limitations:** image files referenced by the config are not watched; after replacing one, make any edit to the config or send SIGHUP.
 
 ## Development
 
@@ -131,3 +233,7 @@ UPDATE_GOLDEN=1 cargo test -p paneld golden
 ```
 
 Golden images live in `tests/fixtures/golden/` at 1:1 scale. Review any changes before committing. A failing golden test writes `<name>.actual.png` next to the golden for comparison.
+
+## Credits
+
+Aircraft data: [adsb.fi](https://adsb.fi) (the `aircraft` source's default provider; personal, non-commercial use, see its terms). Routes: [adsbdb](https://www.adsbdb.com). The preview page shows the adsb.fi credit whenever an aircraft source is configured.

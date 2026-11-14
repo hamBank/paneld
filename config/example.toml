@@ -31,6 +31,90 @@ grid = true
 # firmware_major = 11           # optional override if card discovery fails
 # sync_gap_us = 500             # 0..=20000, gap before the display frame
 
+# Data sources (DESIGN.md §6) write store keys that widgets and conditions read.
+# Source types: static, home_assistant, aircraft, http_poll, prometheus (mqtt
+# arrives in M3). Put personal settings (your location, entity IDs) in a
+# git-ignored config/local.toml, never in this file.
+# Home Assistant: create a long-lived token (profile > Security) and put it in
+# the environment variable named by token_env; the token never goes in a file.
+# Only entities the scenes use (plus `entities`, `series`, `forecasts`) are
+# subscribed. Keys: ha:<entity_id>, ha:<entity_id>.<attribute>,
+# ha:<entity_id>@series, ha:<entity_id>.forecast.<n>.<field>.
+# [sources.ha]
+# type = "home_assistant"
+# url = "ws://homeassistant.local:8123/api/websocket"   # ws:// or wss://
+# token_env = "HA_TOKEN"
+# entities = ["sensor.inverter_ac_power"]    # extra entities to subscribe to
+# series = ["sensor.outdoor_temperature"]    # keep ha:<id>@series for sparklines
+# series_points = 288                        # points kept per series
+# forecasts = ["weather.home"]               # fetch weather.get_forecasts
+# forecast_type = "daily"                    # or "hourly"
+# forecast_interval_s = 1800
+# forecast_len = 5                           # periods written (0 = soonest)
+# MQTT: topics to keys. Plain TCP; the password is read from the environment
+# variable named by password_env. Keys are used as written (quote them); each
+# entry is one exact topic (no + or # wildcards). A topic is a string (the
+# payload is the value: 21.5 is a number, on is text) or a table with a JSON
+# `path` and a `unit`. An empty payload removes the key.
+# [sources.mqtt]
+# type = "mqtt"
+# host = "homeassistant.local"
+# port = 1883                      # default
+# username = "paneld"
+# password_env = "MQTT_PASSWORD"   # needs username
+# client_id = "paneld-mqtt"        # default paneld-<source name>
+# keep_alive_s = 30                # default
+# [sources.mqtt.topics]
+# "home:solar" = "home/power/solar"
+# "home:grid" = { topic = "home/meter", path = "$.power.grid_w", unit = "W" }
+# [sources.demo]
+# type = "static"            # fixed values, written once at start
+# values = { "ha:sensor.outside_temperature" = 21.5 }
+#
+# Aircraft overhead (DESIGN.md §6.1): writes aircraft:count, aircraft:nearest.*
+# and aircraft:list (keys use the source's name). adsb.fi is for personal,
+# non-commercial use and is credited on the preview page. This location is
+# Sydney airport; use your own in config/local.toml, never here. It is rounded
+# to location_decimals before it is sent.
+# [sources.aircraft]
+# type = "aircraft"
+# location = { lat = -33.94, lon = 151.18 }
+# location_decimals = 2      # 0..=6; 2 is about 1 km
+# radius_nm = 10             # 1..=250
+# max_altitude_ft = 15000    # optional
+# include_ground = false
+# interval_s = 15            # >= 1; adsb.fi allows 1 request/s
+# routes = true              # look up origin/destination on adsbdb
+# list_len = 5               # 1..=20 entries in aircraft:list
+# # url = "http://receiver.local/tar1090/data/aircraft.json"   # a local readsb
+
+# Poll a JSON API (DESIGN.md §6.3). `extract` maps store keys to JSON paths
+# ($.a.b, $.list[0].x, $["odd.key"]) or { path, unit }. A path missing or null
+# in a good response removes its key; a failed poll keeps the old values.
+# Secrets (API keys, Authorization) go in environment variables named by
+# header_env, never in this file; `headers` is for non-secret headers only.
+# Put the URL (an API key may be in its query string) in config/local.toml.
+# [sources.weather]
+# type = "http_poll"
+# url = "https://api.example.com/v1/forecast?city=example"
+# interval_s = 600           # >= 1, default 60
+# timeout_s = 10             # 1..=120
+# extract = { "weather:temp" = { path = "$.current.temp", unit = "C" }, "weather:icon" = "$.current.icon" }
+# headers = { Accept = "application/json" }
+# header_env = { "X-Api-Key" = "WEATHER_API_KEY" }   # header -> env var NAME
+
+# Prometheus (DESIGN.md §6.4). `queries` are instant queries that must give
+# exactly one series (a scalar is fine; an empty result removes the key; more
+# than one series is a warning and the key is left alone, so aggregate with
+# sum()/max()). `range_queries` write a Series for sparklines.
+# [sources.prom]
+# type = "prometheus"
+# url = "http://prometheus.local:9090"
+# interval_s = 15            # >= 1, default 15
+# queries = { "prom:house_power" = { query = "sum(power_watts)", unit = "W" }, "prom:up" = "min(up)" }
+# range_queries = { "prom:power_hist" = { query = "sum(power_watts)", range_s = 3600, step_s = 60 } }
+# # bearer_env = "PROM_TOKEN"   # NAME of an env var holding a bearer token
+
 [http]
 bind = "127.0.0.1:8080"
 
@@ -61,15 +145,27 @@ duration_s = 20           # seconds on screen per turn
   widget = { type = "clock", format = "%a %d %b", font = "6x10", font_scale = 2, color = "#80c0ff" }
   # Bottom panel: y 86..172
   [[scene.zone]]
-  rect = { x = 0, y = 86, w = 172, h = 43 }
+  rect = { x = 0, y = 86, w = 172, h = 22 }
   background = "#101030"
   widget = { type = "text", text = "Hello from paneld", font = "9x15", scroll_px_per_s = 30 }
+  # A text zone can be a template: {source:name} or {source:name:spec}, with
+  # the same spec as `format` (here: one decimal). Missing values show "--".
+  # `{{` and `}}` are literal braces.
+  [[scene.zone]]
+  rect = { x = 0, y = 108, w = 172, h = 21 }
+  widget = { type = "text", text = "Out {ha:sensor.outside_temperature:.1}°C", font = "9x15", color = "#80c0ff" }
   # Data sources arrive in M3. Until a source writes these keys the widgets
   # show a dim "--" (value) or nothing (sparkline).
   [[scene.zone]]
   rect = { x = 0, y = 129, w = 172, h = 21 }
   widget = { type = "value", key = "ha:sensor.outside_temperature", format = "{:.1}", unit = "°C", icon = "thermometer", font = "9x15", color = "#40a0ff", align = "center", stale_after_s = 900, thresholds = [
     { above = 20.0, color = "#00ff80" }, { above = 28.0, color = "#ff4000" } ] }
+  # A weather entity's state as icon + text; `condition_icons = {}` uses the
+  # built-in map of Home Assistant's conditions (sunny, rainy, ...). Add
+  # entries to override, or `show_text = false` for the icon alone.
+  # [[scene.zone]]
+  # rect = { x = 0, y = 150, w = 172, h = 22 }
+  # widget = { type = "value", key = "ha:weather.home", condition_icons = {}, font = "9x15" }
   [[scene.zone]]
   rect = { x = 0, y = 150, w = 172, h = 22 }
   widget = { type = "sparkline", key = "prom:house_power_series", color = "#ffaa00", fill = true, points = 120 }

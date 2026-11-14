@@ -367,12 +367,15 @@ fn main() -> anyhow::Result<()> {
 
 fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
     let (cfg, loaded_text) = Config::load_with_text(&config_path)?;
+    paneld::sources::check_environment(&cfg)?;
     let (tx, rx) = frame_channel(cfg.canvas.width, cfg.canvas.height);
     let (reload_tx, reload_rx) = std::sync::mpsc::channel();
     let reload_ctx =
         reload::ReloadCtx::new(&config_path, &cfg, scene.as_deref()).loaded_from(&loaded_text);
     let reload_stats = std::sync::Arc::new(reload::ReloadStats::default());
-    let render = RenderLoop::from_config(&cfg, scene.as_deref(), Store::new())?
+    paneld::tls::init();
+    let store = Store::new();
+    let render = RenderLoop::from_config(&cfg, scene.as_deref(), store.clone())?
         .with_reload(reload_rx)
         .spawn(tx)
         .context("starting render thread")?;
@@ -393,7 +396,12 @@ fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
 
     let mut app = Router::new();
     if let Some(p) = cfg.preview() {
-        app = app.merge(preview::router(rx, p, cfg.canvas.fps));
+        app = app.merge(preview::router(
+            rx,
+            p,
+            cfg.canvas.fps,
+            &paneld::sources::attributions(&cfg),
+        ));
     }
 
     let rt = tokio::runtime::Runtime::new()?;
@@ -401,15 +409,32 @@ fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
         let listener = tokio::net::TcpListener::bind(cfg.http.bind)
             .await
             .with_context(|| format!("binding {}", cfg.http.bind))?;
-        reload::spawn(reload_ctx, reload_tx, reload_stats.clone());
+        let sources = std::sync::Arc::new(tokio::sync::Mutex::new(
+            paneld::sources::Supervisor::start(&cfg, &store),
+        ));
+        reload::spawn(
+            reload_ctx,
+            reload_tx,
+            reload_stats.clone(),
+            Some(reload::SourceReload {
+                supervisor: sources.clone(),
+                store: store.clone(),
+            }),
+        );
         tracing::info!(addr = %cfg.http.bind, "http listening");
         if cfg.preview().is_some() {
             tracing::info!("preview at http://{}/preview", cfg.http.bind);
         }
-        axum::serve(listener, app)
+        let served = axum::serve(listener, app)
             .with_graceful_shutdown(shutdown_signal())
             .await
-            .context("http server")
+            .context("http server");
+        sources
+            .lock()
+            .await
+            .stop_all(std::time::Duration::from_secs(5))
+            .await;
+        served
     });
 
     tracing::info!(

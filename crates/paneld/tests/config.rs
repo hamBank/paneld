@@ -374,7 +374,7 @@ fn value_validation_errors() {
     for want in [
         r#"scene "a" zone[0] value: key must not be empty"#,
         r#"scene "a" zone[0] value: format "{:x}": unsupported format spec "x""#,
-        r#"scene "a" zone[0] value: unknown icon "toaster" (known: thermometer, droplet, bolt, sun, cloud, rain, home, wind)"#,
+        r#"scene "a" zone[0] value: unknown icon "toaster" (known: thermometer, droplet, bolt, sun, cloud, rain, home, wind, snow, moon, fog)"#,
         r#"scene "a" zone[0] value: thresholds[1].above = 1 is a duplicate"#,
         r#"scene "a" zone[0] value: thresholds[2].above must be a finite number (got NaN)"#,
         r#"scene "a" zone[0] value: stale_after_s must be > 0 (got 0)"#,
@@ -640,4 +640,334 @@ fn font_scale_must_be_1_to_8() {
         "{ type = \"text\", text = \"a\", font_scale = 8 }",
     ));
     assert!(ok.is_ok());
+}
+
+#[test]
+fn sources_parse_and_validate() {
+    let cfg = Config::parse(&format!(
+        "{MINIMAL}[sources.demo]\ntype = \"static\"\nvalues = {{ \"demo:t\" = 21.5, \"demo:n\" = 3, \"demo:s\" = \"hi\", \"demo:b\" = false }}\n"
+    ))
+    .unwrap();
+    let paneld::config::SourceConfig::Static(s) = &cfg.sources["demo"] else {
+        panic!("not a static source");
+    };
+    use paneld::config::StaticValue;
+    assert_eq!(s.values["demo:t"], StaticValue::Number(21.5));
+    assert_eq!(s.values["demo:n"], StaticValue::Number(3.0));
+    assert_eq!(s.values["demo:s"], StaticValue::Text("hi".into()));
+    assert_eq!(s.values["demo:b"], StaticValue::Bool(false));
+
+    let e = err(&format!(
+        "{MINIMAL}[sources.\"bad name\"]\ntype = \"static\"\nvalues = {{ \"nocolon\" = 1 }}\n"
+    ));
+    assert!(
+        e.contains("sources.bad name: source names may only use letters, digits, '_' and '-'"),
+        "{e}"
+    );
+    assert!(
+        e.contains(r#"sources.bad name: "nocolon" is not a valid key"#),
+        "{e}"
+    );
+    let e = err(&format!("{MINIMAL}[sources.x]\ntype = \"nope\"\n"));
+    assert!(e.contains("unknown variant `nope`"), "{e}");
+    let e = err(&format!("{MINIMAL}[sources.x]\nvalues = {{}}\n"));
+    assert!(e.contains("missing field `type`"), "{e}");
+}
+
+#[test]
+fn aircraft_source_defaults_and_validation() {
+    let cfg = Config::parse(&format!(
+        "{MINIMAL}[sources.aircraft]\ntype = \"aircraft\"\nlocation = {{ lat = -33.94, lon = 151.18 }}\n"
+    ))
+    .unwrap();
+    let paneld::config::SourceConfig::Aircraft(a) = &cfg.sources["aircraft"] else {
+        panic!("not an aircraft source");
+    };
+    assert_eq!(
+        a.url,
+        "https://opendata.adsb.fi/api/v2/lat/{lat}/lon/{lon}/dist/{radius_nm}"
+    );
+    assert_eq!((a.location.lat, a.location.lon), (-33.94, 151.18));
+    assert_eq!(a.location_decimals, 2);
+    assert_eq!(a.radius_nm, 10);
+    assert_eq!(a.max_altitude_ft, None);
+    assert!(!a.include_ground);
+    assert_eq!(a.interval_s, 15.0);
+    assert!(a.routes);
+    assert_eq!(a.list_len, 5);
+
+    let base = "type = \"aircraft\"\nlocation = { lat = -33.94, lon = 151.18 }\n";
+    for (extra, msg) in [
+        (
+            "interval_s = 0.5",
+            "sources.a: interval_s must be 1 to 86400",
+        ),
+        ("radius_nm = 0", "sources.a: radius_nm must be 1 to 250"),
+        ("radius_nm = 251", "sources.a: radius_nm must be 1 to 250"),
+        ("list_len = 0", "sources.a: list_len must be 1 to 20"),
+        ("list_len = 21", "sources.a: list_len must be 1 to 20"),
+        (
+            "location_decimals = 7",
+            "sources.a: location_decimals must be 0 to 6",
+        ),
+        ("url = \"ftp://x\"", "sources.a: url must start with"),
+        ("bogus = 1", "unknown field `bogus`"),
+    ] {
+        let e = err(&format!("{MINIMAL}[sources.a]\n{base}{extra}\n"));
+        assert!(e.contains(msg), "{extra}: {e}");
+    }
+    let e = err(&format!(
+        "{MINIMAL}[sources.a]\ntype = \"aircraft\"\nlocation = {{ lat = 91.0, lon = 181.0 }}\n"
+    ));
+    assert!(e.contains("location.lat must be between -90 and 90"), "{e}");
+    assert!(
+        e.contains("location.lon must be between -180 and 180"),
+        "{e}"
+    );
+    let e = err(&format!("{MINIMAL}[sources.a]\ntype = \"aircraft\"\n"));
+    assert!(e.contains("missing field `location`"), "{e}");
+}
+
+#[test]
+fn referenced_keys_cover_widgets_and_conditions() {
+    let cfg = Config::parse(
+        r#"
+[canvas]
+width = 64
+height = 32
+[[scene]]
+name = "a"
+condition = "ha:binary_sensor.home && aircraft:count > 0"
+  [[scene.zone]]
+  rect = { x = 0, y = 0, w = 32, h = 16 }
+  widget = { type = "value", key = "ha:sensor.t" }
+  [[scene.zone]]
+  rect = { x = 0, y = 16, w = 32, h = 16 }
+  widget = { type = "sparkline", key = "ha:sensor.p@series" }
+  [[scene.zone]]
+  rect = { x = 32, y = 0, w = 32, h = 32 }
+  widget = { type = "clock" }
+"#,
+    )
+    .unwrap();
+    let keys: Vec<_> = cfg.referenced_keys().into_iter().collect();
+    assert_eq!(
+        keys,
+        vec![
+            "aircraft:count",
+            "ha:binary_sensor.home",
+            "ha:sensor.p@series",
+            "ha:sensor.t"
+        ]
+    );
+}
+
+#[test]
+fn referenced_keys_include_text_templates() {
+    let cfg = Config::parse(
+        r#"
+[canvas]
+width = 64
+height = 32
+[[scene]]
+name = "a"
+  [[scene.zone]]
+  rect = { x = 0, y = 0, w = 64, h = 16 }
+  widget = { type = "text", text = "{ha:sensor.outdoor_temperature:.1}° {{literal}} {aircraft:nearest.callsign}" }
+  [[scene.zone]]
+  rect = { x = 0, y = 16, w = 64, h = 16 }
+  widget = { type = "text", text = "plain" }
+"#,
+    )
+    .unwrap();
+    let keys: Vec<_> = cfg.referenced_keys().into_iter().collect();
+    assert_eq!(
+        keys,
+        vec!["aircraft:nearest.callsign", "ha:sensor.outdoor_temperature"]
+    );
+}
+
+#[test]
+fn bad_templates_are_config_errors_naming_scene_zone_and_column() {
+    let e = err(r#"
+[canvas]
+width = 64
+height = 32
+[[scene]]
+name = "weather"
+  [[scene.zone]]
+  rect = { x = 0, y = 0, w = 64, h = 16 }
+  widget = { type = "text", text = "ok" }
+  [[scene.zone]]
+  rect = { x = 0, y = 16, w = 64, h = 16 }
+  widget = { type = "text", text = "T {ha:sensor.t:.1f}" }
+"#);
+    assert!(
+        e.contains(r#"scene "weather" zone[1] text: invalid template"#),
+        "{e}"
+    );
+    assert!(e.contains("column 16:"), "{e}");
+    assert!(e.contains("expected a precision"), "{e}");
+}
+
+#[test]
+fn condition_icons_are_validated() {
+    let zone = |w: &str| {
+        format!(
+            "{MINIMAL}  [[scene.zone]]\n  rect = {{ x = 0, y = 0, w = 32, h = 16 }}\n  widget = {{ type = \"value\", key = \"ha:weather.home\", {w} }}\n"
+        )
+    };
+    let e = err(&zone(
+        r#"condition_icons = { sunny = "sun", rainy = "umbrella" }"#,
+    ));
+    assert!(
+        e.contains(r#"condition_icons["rainy"]: unknown icon "umbrella""#),
+        "{e}"
+    );
+    let e = err(&zone("show_text = false"));
+    assert!(e.contains("show_text = false needs condition_icons"), "{e}");
+    Config::parse(&zone("condition_icons = {}, show_text = false")).unwrap();
+    Config::parse(&zone(r#"condition_icons = { sunny = "moon" }"#)).unwrap();
+}
+
+#[test]
+fn home_assistant_source_parses_and_validates() {
+    let cfg = Config::parse(&format!(
+        "{MINIMAL}[sources.ha]\ntype = \"home_assistant\"\nurl = \"ws://homeassistant.local:8123/api/websocket\"\ntoken_env = \"HA_TOKEN\"\nseries = [\"sensor.outdoor_temperature\"]\nforecasts = [\"weather.home\"]\nforecast_type = \"hourly\"\n"
+    ))
+    .unwrap();
+    let paneld::config::SourceConfig::HomeAssistant(c) = &cfg.sources["ha"] else {
+        panic!("expected a home_assistant source");
+    };
+    assert_eq!(c.token_env, "HA_TOKEN");
+    assert_eq!(c.series_points, 288);
+    assert_eq!(c.forecast_len, 5);
+    assert_eq!(c.forecast_interval_s, 1800);
+    assert_eq!(c.forecast_type, paneld::config::ForecastType::Hourly);
+
+    let e = err(&format!(
+        "{MINIMAL}[sources.ha]\ntype = \"home_assistant\"\nurl = \"http://x\"\ntoken_env = \"not a name\"\n"
+    ));
+    assert!(e.contains("sources.ha") && e.contains("ws://"), "{e}");
+    assert!(e.contains("NAME of an environment variable"), "{e}");
+    // token_env and url are required.
+    assert!(Config::parse(&format!(
+        "{MINIMAL}[sources.ha]\ntype = \"home_assistant\"\nurl = \"ws://x\"\n"
+    ))
+    .is_err());
+}
+
+#[test]
+fn http_poll_source_defaults_and_validation() {
+    use paneld::config::{ExtractSpec, SourceConfig};
+    let base = "type = \"http_poll\"\nurl = \"https://example.com/api?k=1\"\n";
+    let cfg = Config::parse(&format!(
+        "{MINIMAL}[sources.w]\n{base}extract = {{ \"w:temp\" = {{ path = \"$.current.temp\", unit = \"C\" }}, \"w:icon\" = \"$.list[0].icon\" }}\nheader_env = {{ Authorization = \"WEATHER_AUTH\" }}\nheaders = {{ Accept = \"application/json\" }}\n"
+    ))
+    .unwrap();
+    let SourceConfig::HttpPoll(c) = &cfg.sources["w"] else {
+        panic!("not http_poll");
+    };
+    assert_eq!((c.interval_s, c.timeout_s), (60.0, 10.0));
+    assert_eq!(
+        c.extract["w:icon"],
+        ExtractSpec::Path("$.list[0].icon".into())
+    );
+    assert_eq!(c.extract["w:temp"].unit(), Some("C"));
+    assert_eq!(c.header_env["Authorization"], "WEATHER_AUTH");
+
+    let ok = "extract = { \"w:t\" = \"$.t\" }\n";
+    for (extra, msg) in [
+        (
+            format!("{base}interval_s = 0.5\n{ok}"),
+            "sources.a: interval_s must be 1 to 86400",
+        ),
+        (
+            format!("{base}timeout_s = 0\n{ok}"),
+            "sources.a: timeout_s must be 1 to 120",
+        ),
+        (base.to_string(), "missing field `extract`"),
+        (
+            format!("{base}extract = {{}}\n"),
+            "extract must list at least one key",
+        ),
+        (
+            format!("{base}extract = {{ nocolon = \"$.t\" }}\n"),
+            "extract key \"nocolon\" is not a valid key",
+        ),
+        (
+            format!("{base}extract = {{ \"w:t\" = \"$.a[\" }}\n"),
+            "extract \"w:t\": invalid path \"$.a[\": column 4",
+        ),
+        (
+            format!("{base}extract = {{ \"w:t\" = \"current.t\" }}\n"),
+            "a path must start with `$`",
+        ),
+        (
+            "type = \"http_poll\"\nurl = \"ftp://x\"\nextract = { \"w:t\" = \"$.t\" }\n".into(),
+            "url must start with http:// or https://",
+        ),
+        (
+            "type = \"http_poll\"\nurl = \"https://u:p@x/\"\nextract = { \"w:t\" = \"$.t\" }\n"
+                .into(),
+            "must not contain user:password@",
+        ),
+        (
+            format!("{base}{ok}headers = {{ Authorization = \"Bearer abc\" }}\n"),
+            "looks like a credential; put it in header_env",
+        ),
+        (
+            format!("{base}{ok}headers = {{ \"X-Api-Key\" = \"abc\" }}\n"),
+            "looks like a credential",
+        ),
+        (
+            format!("{base}{ok}header_env = {{ Authorization = \"Bearer abc\" }}\n"),
+            "must be the NAME of an environment variable",
+        ),
+        (
+            format!("{base}{ok}headers = {{ \"bad name\" = \"x\" }}\n"),
+            "not a valid header name",
+        ),
+        (format!("{base}{ok}bogus = 1\n"), "unknown field `bogus`"),
+    ] {
+        let e = err(&format!("{MINIMAL}[sources.a]\n{extra}"));
+        assert!(e.contains(msg), "{msg}: {e}");
+    }
+}
+
+#[test]
+fn prometheus_source_defaults_and_validation() {
+    use paneld::config::{QuerySpec, SourceConfig};
+    let base = "type = \"prometheus\"\nurl = \"http://prometheus.local:9090\"\n";
+    let cfg = Config::parse(&format!(
+        "{MINIMAL}[sources.prom]\n{base}queries = {{ \"prom:power\" = {{ query = \"sum(power_watts)\", unit = \"W\" }}, \"prom:up\" = \"min(up)\" }}\nrange_queries = {{ \"prom:power@series\" = {{ query = \"sum(power_watts)\", range_s = 3600, step_s = 60 }} }}\nbearer_env = \"PROM_TOKEN\"\n"
+    ))
+    .unwrap();
+    let SourceConfig::Prometheus(c) = &cfg.sources["prom"] else {
+        panic!("not prometheus");
+    };
+    assert_eq!((c.interval_s, c.timeout_s), (15.0, 10.0));
+    assert_eq!(c.queries["prom:up"], QuerySpec::Query("min(up)".into()));
+    assert_eq!(c.queries["prom:power"].unit(), Some("W"));
+    assert_eq!(c.range_queries["prom:power@series"].step_s, 60.0);
+    assert_eq!(c.bearer_env.as_deref(), Some("PROM_TOKEN"));
+
+    let q = "queries = { \"p:v\" = \"up\" }\n";
+    for (extra, msg) in [
+        (base.to_string(), "queries or range_queries must list at least one key"),
+        (format!("{base}interval_s = 0\n{q}"), "interval_s must be 1 to 86400"),
+        (format!("{base}queries = {{ nocolon = \"up\" }}\n"), "queries key \"nocolon\" is not a valid key"),
+        (format!("{base}queries = {{ \"p:v\" = \" \" }}\n"), "the query is empty"),
+        (format!("{base}{q}range_queries = {{ \"p:v\" = {{ query = \"up\", range_s = 60, step_s = 10 }} }}\n"), "is in both queries and range_queries"),
+        (format!("{base}range_queries = {{ \"p:r\" = {{ query = \"up\", range_s = 10, step_s = 60 }} }}\n"), "need 0 < step_s <= range_s"),
+        (format!("{base}range_queries = {{ \"p:r\" = {{ query = \"up\", range_s = 86400, step_s = 1 }} }}\n"), "at most 11000 points"),
+        (format!("{base}range_queries = {{ \"p:r\" = {{ query = \"up\", range_s = 60 }} }}\n"), "missing field `step_s`"),
+        (format!("{base}{q}bearer_env = \"abc def\"\n"), "bearer_env must be the NAME of an environment variable"),
+        (format!("type = \"prometheus\"\nurl = \"http://p/?x=1\"\n{q}"), "no query string"),
+        (format!("type = \"prometheus\"\nurl = \"prometheus.local\"\n{q}"), "url must start with http:// or https://"),
+        (format!("{base}{q}bogus = 1\n"), "unknown field `bogus`"),
+    ] {
+        let e = err(&format!("{MINIMAL}[sources.a]\n{extra}"));
+        assert!(e.contains(msg), "{msg}: {e}");
+    }
 }

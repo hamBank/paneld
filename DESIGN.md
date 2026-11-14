@@ -169,7 +169,7 @@ Applied per sink (so the preview can show "true" colours while the panel gets co
   ```
 - `image` widget (M2): `path` (file, relative to the config file) or `key` (a `Value::Image` in the store), `fit` (`contain` default, `cover`, `stretch`, `none`), `align`, `smooth`, `loop`. Scaling is nearest-neighbour unless `smooth` (box filter on axes that shrink), results are cached per (image, zone size), and alpha is blended over the zone background. GIF frames are composited in full (disposal methods and transparency honoured) and picked from `FrameCtx::scene_elapsed`; delays under 20 ms count as 100 ms, like browsers. File decoding happens at config load time (`Config::load_media`), never on the render thread. A future video widget fits the same shape: decode off-thread into frames the widget selects by `scene_elapsed`. `Widget` gained an optional `prepare(zone_w, zone_h)` hook so scaling can be done before the first frame; the widget also copes if it is never called.
 - Initial widgets: `clock`, `text` (static/scrolling, templated from store keys), `value` (number + unit + icon + threshold colours), `sparkline/graph` (from `Series`), `image` (static or GIF), `progress bar`, `icon`.
-- Templating: a small template syntax for text, e.g. `"{ha:sensor.outside_temp:.1}°"`. Keep it minimal and implement it yourself or with a tiny crate. Don't pull in a full template engine.
+- Templating (M3, as built, `template.rs`): hand-written, no engine and no new dependency. A `text` widget's `text` is literal text plus `{source:name}` / `{source:name:spec}`; `{{` and `}}` are literal braces. `spec` is the existing `format::Spec` (`.N`, `>W`, `<W`), reused as is. The key/spec split is positional because `:` is both: first `:` ends the source prefix, the name (`[A-Za-z0-9_][A-Za-z0-9_.@-]*`) runs to the second `:`, the rest is the spec. Values: finite `Number` through the spec; `Text` as is (width pads, precision truncates); `Bool` as `on`/`off`; anything else (missing, non-finite, `Series`, `Image`, `Json`) as `--`, padded to the width. Parse errors carry a column and become config errors naming scene and zone; `Config::referenced_keys()` includes the template keys. Per frame: the template is parsed at widget build time, `Template::fingerprint` hashes only what the output depends on (what each placeholder would show), and the widget re-renders into its reused `String` (and re-measures the width) only when the hash changes, so unchanged frames do no formatting and no allocation. Comparing `updated_at` or `Arc` pointers was rejected: any store write changes the snapshot, and values can be rewritten unchanged. Deviation from the old behaviour: `text` that contains a lone `{` or `}` used to be shown literally and is now a template (use `{{`/`}}`). `clock` has no templates. Not done: per-placeholder staleness.
 - Fonts (M2, as built): the `embedded-graphics` ISO-8859-1 mono fonts plus BDF fonts loaded at runtime, behind one `fonts::Font` (a `FontFace` enum of `Mono(&MonoFont)` / `Bdf(Arc<BdfFont>)` plus an integer scale). Decisions:
   - *Parser:* hand-written (`bdf.rs`, ~250 lines with tests), not `bdf-parser` or `eg-bdf`. The subset we need is a few keywords; our own parser reports `line N` errors that we can put in config errors, handles `DWIDTH` proportional advances directly, and adds no dependency (and no MSRV or `--locked` surface). `bdf-parser` is at 0.1.0 on crates.io. `eg-bdf` does not come up in `cargo search` (checked 2026-11-12); as far as we know it targets compile-time conversion to `static` data, which doesn't fit loading from a path named in config. Revisit `bdf-parser` if BDF support needs to grow beyond this subset.
   - *Abstraction:* our own `Font` with `text_width`, `line_height` and `draw`, rather than `TextRenderer`/`CharacterStyle` impls. The widgets only need "measure this string, draw it at x/centre-y with an alignment", and an integer scale is easiest as a `DrawTarget` adapter (`ScaleTarget`) that turns each font pixel into an N×N block; built-in fonts are drawn through the stock `MonoTextStyle` onto that adapter, so scale 1 is pixel-identical to the old rendering. BDF glyph pixels are emitted straight into it. No per-glyph rasterised cache: glyph bitmaps are already the cache.
@@ -193,23 +193,135 @@ Applied per sink (so the preview can show "true" colours while the panel gets co
 `Source` trait, each running as its own tokio task, writing into the store:
 
 ```rust
-#[async_trait]
-trait Source {
-    fn name(&self) -> &str;
-    async fn run(self: Box<Self>, store: StoreWriter, shutdown: CancellationToken) -> anyhow::Result<()>;
+// As built (crates/paneld/src/sources/mod.rs). No async-trait or tokio-util:
+// a boxed future and our own `Shutdown` (a tokio watch channel) do the job.
+pub trait Source: Send {
+    fn run(self: Box<Self>, ctx: SourceCtx) -> SourceFuture; // Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>
 }
+pub struct SourceCtx { pub name: Arc<str>, pub store: StoreWriter, pub shutdown: Shutdown, pub health: Arc<SourceHealth> }
 ```
 
-Supervisor restarts failed sources with backoff and reports health in metrics.
+- **Config:** each `[sources.<name>]` has a required `type`.
+- **Supervisor:** rebuilds a failed source from its config and restarts it, with backoff of 1 s doubling to 60 s. The backoff resets after a run of 60 s.
+- **Health:** each source has `up`, `errors`, `restarts` and `last_ok`, for `/metrics` in M5. Sources report a recoverable error with `ctx.error()`, a success with `ctx.ok()`, and return `Err` only to be restarted.
+- **Writes:** `StoreWriter::apply` sets and removes several keys under one lock, so the render loop never sees half an update.
+- **Subscriptions:** `Config::referenced_keys()` lists the keys the scenes read, so a source can subscribe only to those.
+- **One HTTP/TLS stack:** `reqwest` and `tokio-tungstenite` (HA WebSocket), both on rustls with the `ring` provider (`crate::tls::init`), never `aws-lc-rs`. `ring` only needs a C cross-compiler for the Pi (CI installs `gcc-aarch64-linux-gnu`), not CMake. All HTTP goes through `sources::http_client()`, whose User-Agent is a generic `paneld/<version>`.
+- **Hot reload (as built, `Supervisor::reconcile`):** after a reload is accepted, each source is compared by name with the running one. Unchanged: left running (health and state untouched). Changed: stopped (its own shutdown channel, aborted after 5 s) and started fresh with new health counters; its old values stay until the new instance reports success, then the keys it did not rewrite are removed. Removed: stopped and its keys cleared. Added: started. Logged as `source restarted: <name> (config changed)`, `source started: <name>`, `source stopped: <name> ...`.
+  - **What "changed" means:** a source's *effective config*, `sources::effective_config(scfg, referenced_keys)`, compared as `Debug` text. That is its `[sources.<name>]` table plus whatever it derives from the rest of the config. Today only Home Assistant derives anything: the `ha:` keys the scenes read, reduced to entity IDs. So a scene that starts showing another `ha:` entity restarts HA, while an edit to scenes, other sources' keys, or another attribute or `@series` of an already-subscribed entity does not. `Debug` text was chosen over `PartialEq` so a new `SourceConfig` variant needs no extra code and no edits to `config.rs`; it is deterministic because config types hold no hash maps, and it holds no secrets (only env var names). A variant that derives something from the whole config adds it in `effective_config`; one that needs an env var adds it in `check_source_environment`.
+  - **Keys:** keys are prefixed by convention and not tracked per source, but every `Entry` records its `source`, so `Store::clear_source(name)` removes exactly what that source wrote, in one write, after its task has stopped (so nothing is written after the clear). It is done for removed sources. For changed ones, `Store::clear_source_older_than(name, restart time)` runs once the new instance's first `ctx.ok()` arrives (or after 10 minutes), so a key the new config no longer produces does not linger, there is no flash of placeholders for keys it still writes, and state a source re-reads from the store (the HA `@series`) survives the restart.
+  - **Missing env var:** before a changed or added source is touched, `check_source_environment` runs. If it fails (e.g. the HA `token_env` is unset), that source is skipped and the old one keeps running; the error is logged and counted in `reload_errors` (the scene changes of the same reload still apply and count in `reloads`). The next reload retries, because the running fingerprint is unchanged.
+  - **Wiring:** the watch task owns access to the supervisor (`Arc<tokio::sync::Mutex<Supervisor>>`, shared only with shutdown). It reconciles after sending the scene set to the render loop; the render thread never waits on it.
+  - **Limitation:** the preview page's data-provider credits (`attributions`) are computed at start-up, so adding an aircraft source on reload does not add its credit until a restart.
+- **`type = "static"`:** fixed values written once, for demos and laying out scenes.
 
 Initial sources:
-1. **Home Assistant WebSocket**: authenticate with a long-lived token (env var, never in config), `subscribe_entities` or `subscribe_events(state_changed)` filtered to the entity IDs the config references. Keys: `ha:<entity_id>` plus `ha:<entity_id>.<attribute>`.
+1. **Home Assistant WebSocket**: authenticate with a long-lived token (env var, never in config), `subscribe_entities` or `subscribe_events(state_changed)` filtered to the entity IDs the config references. Keys: `ha:<entity_id>` plus `ha:<entity_id>.<attribute>`. Details for M3:
+   - **Values:** a numeric state becomes a `Number`, with its unit taken from the `unit_of_measurement` attribute. `unavailable`/`unknown` remove the key, so widgets show `--` and conditions are false. Anything else becomes `Text`.
+   - **Weather entities:** the state is the condition (`sunny`, `partlycloudy`, `rainy`, …), and the attributes hold the current `temperature`, `humidity`, `wind_speed` and so on. As far as we know, current HA no longer puts the forecast in the attributes; it comes from the `weather.get_forecasts` action, called over the WebSocket with `return_response`. Confirmed against the HA docs (see `crates/paneld/src/sources/HA_PROTOCOL.md`). When the config asks for forecasts, the source calls it on an interval (default 30 min) and writes `ha:<entity_id>.forecast.<n>.<field>` for the next few periods, with `n = 0` the soonest.
+   - **Series (for sparklines):** for entities listed in `series = [...]`, the source keeps a rolling `Series` at `ha:<entity_id>@series`. It is sampled on every numeric state change and capped by `series_points` (config name; the DESIGN text said `points`). At startup (and after each reconnect) it is backfilled from the recorder with `history/history_during_period` over the last 24 h, downsampled to `series_points`. That command is not in the developer docs page; it was confirmed from HA core source (`history/websocket_api.py`), and a failure is logged and ignored.
+   - **As built (`sources/ha.rs`):** config `url`, `token_env`, `entities`, `series`, `series_points` (288), `forecasts`, `forecast_type` (`daily`|`hourly`), `forecast_interval_s` (1800), `forecast_len` (5). Details and deviations:
+     - **`subscribe_entities`, not `subscribe_events`:** the docs describe it as the compact form (`a`/`c`/`r`) and it takes an `entity_ids` filter. A `c` diff omits `s` when only attributes changed, so the source keeps each entity's last state and attributes.
+     - **Which entities:** `Config::referenced_keys()` (`ha:` keys, with attribute and `@series` suffixes stripped; the entity is the first two dot-separated parts) plus `entities`, `series` and `forecasts`. The supervisor copies the referenced keys into `HaConfig::referenced` (a `#[serde(skip)]` field) when it starts sources, so `build()` keeps its signature and reload still compares only the TOML. An empty set means no subscription (HA reads an empty `entity_ids` as "everything"). Changing which entities scenes use takes a source restart.
+     - **Keys:** attributes are `Number`/`Text`/`Bool`, or `Json` for arrays and objects (null is skipped). Removed attributes and removed entities have their keys removed in the same `apply` batch. `ha:<entity>.forecast` is `Json` of the first `forecast_len` periods; one `call_service` per forecast entity at start and then every interval.
+     - **Series:** kept in the source and written whole, in the same batch as the state. After a reconnect it is seeded from the store (`StoreWriter::snapshot` was added for this), so it survives drops.
+     - **Connection:** one connection per run; any failure returns `Err` and the supervisor backs off (1 s to 60 s). `ping` every 30 s; no `pong` within 10 s ends the run. `auth_invalid` is an error naming `token_env`, never the token. Last values stay in the store while down. `paneld run` checks that the `token_env` variable is set at startup.
+   - **Weather icons (decided, as built):** a `condition_icons` table on the `value` widget (plus `show_text`), not a separate `weather` widget. The `value` widget already has the icon + text layout, alignment, font, colour and staleness; a `weather` widget would duplicate all of it for one extra lookup. When the value is `Text` and `condition_icons` is set, the icon comes from the table, then from a built-in map (`icons::DEFAULT_CONDITION_ICONS`) of the 15 conditions in the HA developer docs (https://contributors.home-assistant.io/core/entities/weather/, section Conditions; the page was `developers.home-assistant.io/docs/core/entity/weather/` earlier), then falls back to `icon`. Three 12x12 icons were added for it: `snow`, `moon` (`clear-night`) and `fog`. There is no partly-cloudy, hail or storm icon, so `partlycloudy` uses `cloud`, `hail` uses `snow`, `lightning-rainy` uses `bolt` and `exceptional` uses `thermometer`.
 2. **MQTT subscribe**: arbitrary topics → keys, with optional JSON path extraction.
-3. **HTTP poll**: URL + interval + JSON path(s) → keys. Covers weather and generic APIs.
-4. **Prometheus query**: instant queries (and range queries for sparklines) against a Prometheus URL → `Number`/`Series`.
+   - **As built (`sources/mqtt.rs`):** config `host`, `port` (1883), `username`, `password_env`, `client_id` (`paneld-<source name>`), `keep_alive_s` (30) and `topics`, a table of store key to topic, where a topic is a string or `{ topic, path, unit }`. Keys are used as written (like `static`), not prefixed with the source name. Decisions:
+     - **No wildcards:** `+` and `#` are rejected in validation. A wildcard topic would need a key per matching topic (templating from the topic), which a config-time key list can't express. One key per entry; two keys can share a topic with different paths (one subscription).
+     - **Payloads:** an empty or whitespace-only payload removes the topic's keys (a deleted retained message). With `path`: JSON required, the value at the path is stored, `null` removes, a missing path or non-JSON leaves the key unchanged. Without `path`: JSON first, else the trimmed UTF-8 text through `extract::to_value`, so `21.5` is a `Number` and `on` is `Text`. Each publish is one `apply`. Retained messages are ordinary values. Bad payloads are logged once per topic (then at debug), add to the error counter, and don't flip `up`, since the connection is fine.
+     - **QoS 0, clean session:** values are "latest reading", retained messages arrive on subscribe at any QoS, and a QoS 1 backlog after a reconnect would only replay stale values. rumqttc does not resubscribe on a clean session, so the source sends one SUBSCRIBE (all topics) on every ConnAck.
+     - **Reconnects:** rumqttc reconnects on the next `poll()` after an error, in a tight loop if the broker is down. The source calls `ctx.error()`, waits 1 s doubling to 30 s (reset on ConnAck) and polls again; `ctx.ok()` on ConnAck and on each publish. Last values stay in the store while down. Only a failed subscribe request (channel full, which can't happen with the sized channel) returns `Err`.
+     - **Secrets:** the password lives in a `Password` type with a redacted `Debug`; rumqttc's `MqttOptions` `Debug` prints credentials, so it is never printed. `password_env` requires `username` (MQTT 3.1.1 §3.1.2.9) and is checked at `run` start.
+     - **Reuse for M4:** `ClientSettings` (host, port, credentials, client id, keep-alive, `options()`) is separate from the topic handling, so §7.2's publishing client can build from the same settings.
+     - **Plain TCP only (follow-up: TLS):** `rumqttc` is added with `default-features = false`. Its `use-rustls-no-provider` feature was tried: it keeps one `rustls` 0.23 and no `aws-lc-rs`, but adds a second `rustls-webpki` (0.102 beside 0.103), `rustls-native-certs` and `rustls-pemfile` (about 85 more lockfile lines than plain TCP), and needs our own `rustls::ClientConfig` (ring provider, CA file or webpki roots) and config fields (`tls`, `ca_file`) wired through. Home LAN brokers are usually plain, so that waits for a need. Until then don't point this source at a broker across the internet.
+     - **Tests:** a fake MQTT 3.1.1 broker on `127.0.0.1:0` (CONNECT/CONNACK, SUBSCRIBE/SUBACK, QoS 0 PUBLISH, PINGREQ, DISCONNECT, hard drop), packet layouts cited from the OASIS spec in comments.
+3. **HTTP poll** (`sources/http_poll.rs`): URL + interval + JSON path(s) → keys. Covers weather and generic APIs. As built:
+   - **Config:** `url`, `interval_s` (>= 1, 60), `extract` (key → `"$.path"` or `{ path, unit }`), `headers`, `header_env` (header name → env var name), `timeout_s` (10). Paths use the shared `extract.rs` syntax and are checked at config load (errors name the column). `headers` rejects credential-looking names (`auth`, `key`, `token`, `cookie`, ...): secrets must use `header_env`. The variables are read when the source is built and `paneld run` checks they are set at start (`check_environment`); values are `HeaderValue::set_sensitive`, so they never appear in `Debug`, logs or errors.
+   - **Writes:** one `apply` batch per successful poll. A path that is missing or `null` in a successful response **removes** its key. A failed poll (transport error, non-2xx, 429, body not JSON) writes nothing, so old values stay.
+   - **Polling:** shared with the aircraft source in `sources/poll.rs`: never faster than `interval_s`; `Retry-After` (seconds form, default 60 s, at most 1 h) on 429; otherwise errors back off `interval * 2^n` capped at 5 min; 8 MiB body cap; errors are logged without the URL (API keys often live in query strings); redirects are followed only to the same host and port, so credentials never travel elsewhere.
+4. **Prometheus query** (`sources/prometheus.rs`): instant queries (and range queries for sparklines) against a Prometheus URL → `Number`/`Series`. Confirmed against https://prometheus.io/docs/prometheus/latest/querying/api/ (`/api/v1/query`, `/api/v1/query_range`, envelope `status`/`data`/`errorType`/`error`, `resultType` `vector`/`scalar`/`matrix`, samples as `[ts, "string"]`, 400/422/503 for errors). As built:
+   - **Config:** `url` (server base, a path prefix is fine), `interval_s` (15), `queries` (key → PromQL or `{ query, unit }`), `range_queries` (key → `{ query, range_s, step_s }`; `step_s <= range_s`, at most 11000 points), `bearer_env`, `timeout_s` (10).
+   - **Instant results:** a scalar gives its value; a vector with one series gives its value; an empty vector, `NaN`/`Inf` or a native histogram removes the key; a vector with several series writes nothing for that key (old value stays), logs a warning naming the key and series count, and counts `ctx.error()`. A 400/422 for one query is handled the same way (the server's `errorType: error` text is logged, capped at 200 chars). **Range:** `Series` from the first series, oldest first, non-finite samples skipped.
+   - **Execution:** all queries of a round run concurrently, at most 4 at once, and everything that succeeded is written in one batch. If every query fails with a transport error, 5xx or 401/403, the whole source backs off; 429 honours `Retry-After`. Backoff and the other polling rules are the same as for HTTP poll (`sources/poll.rs`).
 5. **Clock/system**: time, date, uptime, local CPU temp.
 6. **Media folder**: images/GIFs loaded and scaled to zone size on demand (cached). *(M2 only has what the `image` widget needs: `path` files decoded at config load. The folder source, async loading and `media:` keys arrive in M3.)*
 7. **HTTP push** (via control API, §7): external scripts write keys or raise notifications.
+8. **Aircraft (ADS-B)**: aircraft currently near a configured point, from adsb.fi, with routes from adsbdb. Built so a local receiver can replace adsb.fi later. See §6.1.
+
+### 6.1 Aircraft source (M3)
+
+Chosen after comparing the free and paid APIs (2026-11-13): adsb.fi is free, needs no key, allows 1 request/s and already returns registration, type, distance and bearing. adsb.lol allows 500 requests/day without a key, which is too few for "what's overhead now". OpenSky has no aircraft type, and paid APIs are overkill.
+
+**Provider: adsb.fi open data.** `GET https://opendata.adsb.fi/api/v2/lat/{lat}/lon/{lon}/dist/{nm}`, radius up to 250 NM. Terms (from its README, checked 2026-11-13):
+- personal, non-commercial use only;
+- public endpoints are limited to 1 request/s, and 400/401/403/404/429 responses count towards the limit;
+- you must cite adsb.fi with a link to its home page. We do that in the README and in the preview page footer whenever the source is configured.
+
+The response is ADS-B Exchange v2 compatible: `{"aircraft": [...], "now", "resultCount", "ptime"}`. Per aircraft we use:
+- `hex`, `flight` (space-padded), `r` (registration), `t` (ICAO type), `desc`;
+- `alt_baro` (feet, or the string `"ground"`), `gs` (knots), `track`, `baro_rate`, `squawk`, `emergency`;
+- `lat`, `lon`, `dst` (NM from the query point), `dir` (bearing in degrees), `seen_pos`.
+
+adsb.lol returns the same objects under `ac` instead of `aircraft`, so the parser accepts both.
+
+**Config:**
+```toml
+[sources.aircraft]
+type = "aircraft"
+# A URL template; {lat} {lon} {radius_nm} are filled in. Default: adsb.fi.
+url = "https://opendata.adsb.fi/api/v2/lat/{lat}/lon/{lon}/dist/{radius_nm}"
+location = { lat = -33.94, lon = 151.18 }   # the point to measure from
+location_decimals = 2      # round before sending (2 = about 1 km); see Privacy
+radius_nm = 10
+max_altitude_ft = 15000    # optional; ignore aircraft above this
+include_ground = false     # ignore aircraft reporting alt_baro = "ground"
+interval_s = 15            # >= 1; adsb.fi allows 1/s, so leave headroom
+routes = true              # look up routes on adsbdb (below)
+list_len = 5               # how many aircraft go into aircraft:list
+```
+
+**Store keys.** Aircraft are filtered (radius, altitude, ground) and then sorted by distance.
+- `aircraft:count` (`Number`).
+- `aircraft:nearest.*` describes the nearest aircraft:
+  - text: `callsign` (trimmed), `registration`, `type`, `desc`, `bearing_compass` (`N`, `NE`, …), `route` (`SYD-AKL`; `route_separator`, default `-` because the built-in ISO-8859-1 fonts have no `→`), `origin` and `destination` (IATA, else ICAO);
+  - numbers: `alt_ft`, `speed_kt`, `dist_nm`, `bearing`.
+- `aircraft:list` (`Json`): the nearest `list_len` aircraft with the same fields, for a list widget later. This adds the `Json` store variant that §5.3 already plans.
+- When nothing is in range, `count` is 0 and the `nearest.*` keys are **removed**, so `value` widgets show `--` and conditions such as `aircraft:nearest.alt_ft < 5000` are false. This needs a `StoreWriter::remove`.
+- When a fetch fails, the last values stay, and their `updated_at` ages so `stale_after_s` can grey them out.
+
+**Rate limits and errors.**
+- Never poll faster than `interval_s`.
+- A 429 waits for `Retry-After` (or 60 s).
+- Other errors back off exponentially, up to 5 minutes. They are counted in `source_errors_total{source}` and reported by the M3 supervisor.
+- The User-Agent is a generic `paneld/<version>`, with nothing that identifies the user.
+
+**Routes: adsbdb.** `GET https://api.adsbdb.com/v0/callsign/{callsign}` returns airline, origin and destination. The rules:
+- Look up only the aircraft in `aircraft:list`, and only from the source task, never the render thread.
+- Cache results in memory only: up to 512 callsigns for 12 h, and misses for 1 h. adsbdb's route data may not be copied into other databases, so nothing is persisted.
+- `routes = false` turns lookups off.
+
+**As built (differences and details, 2026-11-14).**
+- *Key prefix:* keys use the source's **name**, so `[sources.aircraft]` writes `aircraft:*` and `[sources.planes]` writes `planes:*`. All keys of one poll, starting with `RemovePrefix("<name>:nearest.")`, go in one `StoreWriter::apply` batch.
+- *Intervals:* the wait is measured from the end of a poll, so polls are never closer than `interval_s`. A 429 waits `max(Retry-After, interval_s)` (default 60 s, at most 1 h). Other errors wait `interval_s * 2^n` for the n-th consecutive failure, capped at 5 min. A failed poll leaves the store untouched and calls `ctx.error()`.
+- *Routes:* lookups never block the poll. A poll publishes positions with whatever routes are cached, then one background task looks up the missing callsigns one at a time. Each finished lookup republishes the last good list from the cache (no request to the provider), unless the latest poll failed, so stale values are never refreshed by it. Lookup errors (network, 5xx, 429) are cached for 60 s, so a flaky adsbdb is not hammered; 404 and unknown callsigns are cached for the 1 h miss time. Callsigns are used only if they are 2 to 8 ASCII letters or digits.
+- *Parsing:* aircraft without `lat`/`lon` are skipped. `alt_geom` is used if `alt_baro` is missing. `emergency = "none"` counts as no emergency. Aircraft with unknown altitude pass `max_altitude_ft`. Distance and bearing are always computed locally from the *exact* configured location; the provider's `dst`/`dir` are ignored, since they are relative to the rounded query point. Only the rounded point is sent, and the request radius is widened by the most rounding can move it (`query_radius_nm`: +0.42 NM at 2 decimals), so nothing in range is lost.
+- *Tests:* intervals, the backoff cap and the adsbdb base URL are injected (`Tuning`), not config fields, so no config surface was added for tests.
+
+**Privacy.** A radius query has to send a location. We send it rounded to `location_decimals` (default 2, about 1 km), and the exact home coordinates are never logged at info level or above. The committed `config/example.toml` uses a public landmark, never a real home. Taking the location from HA's `zone.home` (`location = "ha:zone.home"`) is a possible follow-up once the HA source exists.
+
+**Handles for a local receiver.** The source depends on one contract, so a local receiver can replace adsb.fi with only a `url` change:
+- **Endpoint shape:** an HTTP GET to the templated `url` returns a JSON object with an `aircraft` (or `ac`) array of ADS-B Exchange v2 aircraft objects.
+- **What it can leave out:** `dst`/`dir` (we compute them with haversine from `location`), `r`/`t`/`desc` (those keys are left unset), and the radius filter (we filter again ourselves anyway).
+
+Two local setups that need no paneld change:
+1. **readsb/tar1090 directly:** `url = "http://receiver.local/tar1090/data/aircraft.json"`. It has the same per-aircraft fields. `r`/`t` only appear if readsb runs with its aircraft database (`--db-file`).
+2. **A small separate daemon (later, a separate process):** wraps readsb plus an aircraft database and serves adsb.fi's path, `/v2/lat/{lat}/lon/{lon}/dist/{nm}`, with identical JSON. paneld just points `url` at it. It can also add things adsb.fi can't, such as per-receiver signal strength.
+
+A local source can poll every 1 s, since there is no external limit. Internally everything parses into one `Aircraft` struct; providers differ only by URL and small parser differences (`aircraft` vs `ac`). Tests use recorded fixtures (adsb.fi, adsb.lol and a readsb `aircraft.json`, captured at a public landmark) and a mock HTTP server for the 429 and backoff paths, with no network.
+
+**Display.** Once M3 templating exists, an example "overhead" scene with `condition = "aircraft:count > 0"` can show `{aircraft:nearest.callsign} {aircraft:nearest.route}`, the type and altitude in `value` widgets, and the distance and compass bearing.
 
 ---
 
@@ -237,12 +349,13 @@ Publish discovery configs so HA auto-creates one device with:
 Also accept raw notification JSON on `<prefix>/notify` (same schema as HTTP). Use `rumqttc`. Availability topic + LWT.
 
 ### 7.3 Config hot reload
-Watch the config file. On change: parse + validate fully, build the new scenes and playlist (including image decoding and `Widget::prepare`) off the render thread, then hand the prepared set to the render loop, which swaps it in atomically with a non-blocking check at the top of a frame. Sources whose config changed get restarted, others keep running (source restarts arrive with M3; M2 reloads scenes and playlist only). On error: log, keep the old config, count `config_reload_errors_total` (`ReloadStats::reload_errors`; exported as `paneld_config_reload_errors_total` in M5).
+Watch the config file. On change: parse + validate fully, build the new scenes and playlist (including image decoding and `Widget::prepare`) off the render thread, then hand the prepared set to the render loop, which swaps it in atomically with a non-blocking check at the top of a frame. Sources whose config changed get restarted, others keep running (see §6, "Hot reload", for how "changed" is decided, what happens to a removed source's keys and the environment-variable check). On error: log, keep the old config, count `config_reload_errors_total` (`ReloadStats::reload_errors`; exported as `paneld_config_reload_errors_total` in M5).
 
 As built (`reload.rs`):
 - **Polling instead of the `notify` crate.** Once a second the file is read and its content hashed. This works the same for in-place writes, rename-and-replace, network filesystems and macOS, is independent of mtime granularity, and adds no dependency. The cost is up to ~2 s latency. SIGHUP (unix) reloads immediately.
 - **Debounce:** a change is parsed once the same new content has been seen on two consecutive polls. Identical content (a touch) never reloads. Content that failed is not retried until it changes or SIGHUP arrives.
 - **Restart-only:** `canvas.fps`, `[http]` and all `[[output]]` settings (including Colorlight gamma, brightness, colour order; applying them live would need a settings channel into each sink, deferred). A difference logs a warning naming it, and scene and playlist changes still apply. A changed canvas width/height is different: the whole reload is rejected, because scenes laid out for the new size would not fit the running canvas.
+- **`[sources]` is applied live**, per source (§6). It is no longer restart-only.
 - `run --scene X` keeps showing X; if X is gone the reload is rejected.
 - Image files are not watched (limitation); edit the config or send SIGHUP.
 
@@ -288,20 +401,29 @@ discovery_prefix = "homeassistant"
 node_id = "paneld"
 
 [sources.ha]
+type = "home_assistant"
 url = "ws://homeassistant.local:8123/api/websocket"
 token_env = "PANELD_HA_TOKEN"
 
 [sources.prom]
 type = "prometheus"
 url = "http://prometheus.local:9090"
-queries = { "prom:house_power" = "sum(power_watts)" }
+queries = { "prom:house_power" = { query = "sum(power_watts)", unit = "W" } }
+range_queries = { "prom:house_power_hist" = { query = "sum(power_watts)", range_s = 3600, step_s = 60 } }
 interval_s = 10
 
 [sources.weather]
 type = "http_poll"
 url = "https://example/api/forecast"
 interval_s = 600
-extract = { "weather:temp" = "$.current.temp", "weather:icon" = "$.current.icon" }
+extract = { "weather:temp" = { path = "$.current.temp", unit = "C" }, "weather:icon" = "$.current.icon" }
+header_env = { "X-Api-Key" = "WEATHER_API_KEY" }   # header name -> env var NAME
+
+[sources.aircraft]           # §6.1; adsb.fi by default, a local receiver later by changing `url`
+type = "aircraft"
+location = { lat = -33.94, lon = 151.18 }   # example: Sydney airport, not a home
+radius_nm = 10
+interval_s = 15
 
 [playlist]
 default_duration_s = 10   # used by scenes without duration_s; > 0, at most 86400
@@ -389,7 +511,7 @@ CI (GitHub Actions: fmt, clippy, tests, an aarch64 check for the Pi, a macOS che
 1. **M0 Skeleton**: workspace, config parsing, canvas, render loop, preview sink, `clock` + `text` widgets, `paneld render`. Runs on a laptop.
 2. **M1 Hardware**: `colorlight-proto` (with PROTOCOL.md + tests), `colorlight-net`, `probe`, `test-pattern`, ColorlightSink, gamma/brightness. Two panels lit on the Pi.
 3. **M2 Scenes**: zones, playlist rotation, conditions, `value`/`image`/`sparkline` widgets, hot reload.
-4. **M3 Data**: HA WebSocket, MQTT subscribe, HTTP poll, Prometheus sources, templating.
+4. **M3 Data**: HA WebSocket, MQTT subscribe, HTTP poll, Prometheus sources, the aircraft source (adsb.fi + adsbdb routes, §6.1), templating.
 5. **M4 Control**: HTTP API, MQTT discovery entities, notifications queue, quiet hours/auto-dim.
 6. **M5 Ops**: metrics, systemd unit, deploy docs, cross-compile.
 7. **M6 Scale**: multi-region/multi-card output map, rotation/flip.
@@ -406,4 +528,11 @@ Each milestone ends with: tests green, `cargo clippy -- -D warnings` clean, READ
 - ~~Side-by-side or stacked~~ **Answered:** stacked vertically, canvas 172×172.
 - Pixel byte order of the actual panels (RGB or BGR). The protocol doesn't say; confirm with the M1 `test-pattern`, then set the output's colour order.
 - Which HUB75 port(s) each panel is on and how the card maps them (sets `card_offset` in the M1 output map). Confirm in LEDVision.
-- Which HA entities and external APIs to show first (drives M3 priorities).
+- ~~Which HA entities and external APIs to show first~~ **Answered (2026-11-13):**
+  - **External APIs:** aircraft near me first, via adsb.fi with adsbdb routes, plus hooks for a local receiver later (§6.1).
+  - **HA, first three entities:**
+    - an outdoor temperature sensor (an Ecowitt-style weather station);
+    - the solar inverter's AC power in W (Fronius), shown as a value and a sparkline (`series`);
+    - a `weather.*` forecast entity: condition, current temperature and forecast.
+  - **Location:** provided.
+  - **Kept out of the repo:** the real entity IDs and the coordinates live only in the user's own config (`config/local*.toml` is git-ignored). Examples, tests and fixtures use generic IDs and a public landmark.

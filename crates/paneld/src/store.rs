@@ -11,8 +11,7 @@ use std::time::SystemTime;
 
 use crate::media::Bitmap;
 
-/// A stored value. More variants (`Json`) arrive with the widgets
-/// and sources that need them.
+/// A stored value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Number {
@@ -29,6 +28,9 @@ pub enum Value {
     /// A decoded image. Shared, so cloning a value or a snapshot is cheap and
     /// widgets can tell a new image from the old one by pointer.
     Image(Arc<Bitmap>),
+    /// Structured data a source wants to keep whole (e.g. the aircraft list).
+    /// Shared, so snapshot clones stay cheap.
+    Json(Arc<serde_json::Value>),
 }
 
 /// A value plus where and when it came from, so widgets can show staleness.
@@ -57,6 +59,31 @@ impl Store {
         self.inner.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// Remove every entry written by the source named `source` (the
+    /// [`Entry::source`] stamp), in one write. Returns how many were removed.
+    pub fn clear_source(&self, source: &str) -> usize {
+        let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        let before = guard.len();
+        if !guard.values().any(|e| &*e.source == source) {
+            return 0;
+        }
+        Arc::make_mut(&mut guard).retain(|_, e| &*e.source != source);
+        before - guard.len()
+    }
+
+    /// Remove `source`'s entries last written before `before` (keys a
+    /// restarted source no longer produces). Returns how many were removed.
+    pub fn clear_source_older_than(&self, source: &str, before: SystemTime) -> usize {
+        let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        let stale = |e: &Entry| &*e.source == source && e.updated_at < before;
+        if !guard.values().any(stale) {
+            return 0;
+        }
+        let n = guard.len();
+        Arc::make_mut(&mut guard).retain(|_, e| !stale(e));
+        n - guard.len()
+    }
+
     /// A writer that stamps every value with `source`.
     pub fn writer(&self, source: &str) -> StoreWriter {
         StoreWriter {
@@ -73,7 +100,57 @@ pub struct StoreWriter {
     source: Arc<str>,
 }
 
+/// One change in a [`StoreWriter::apply`] batch.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Change {
+    Set(String, Value),
+    Remove(String),
+    /// Remove every key starting with this prefix.
+    RemovePrefix(String),
+}
+
 impl StoreWriter {
+    /// Current contents of the whole store (for a source that must resume
+    /// from what an earlier run wrote, e.g. a rolling series).
+    pub fn snapshot(&self) -> StoreSnapshot {
+        self.store.snapshot()
+    }
+
+    /// Remove `key`. Widgets then show their missing-value placeholder and
+    /// conditions on it are false.
+    pub fn remove(&self, key: &str) {
+        self.apply(vec![Change::Remove(key.to_owned())]);
+    }
+
+    /// Apply several changes under one write lock, so a snapshot sees all of
+    /// them or none (e.g. every `aircraft:nearest.*` key of one poll).
+    pub fn apply(&self, changes: Vec<Change>) {
+        if changes.is_empty() {
+            return;
+        }
+        let now = SystemTime::now();
+        let mut guard = self.store.inner.write().unwrap_or_else(|e| e.into_inner());
+        let map = Arc::make_mut(&mut guard);
+        for c in changes {
+            match c {
+                Change::Set(key, value) => {
+                    map.insert(
+                        key,
+                        Entry {
+                            value,
+                            updated_at: now,
+                            source: self.source.clone(),
+                        },
+                    );
+                }
+                Change::Remove(key) => {
+                    map.remove(&key);
+                }
+                Change::RemovePrefix(prefix) => map.retain(|k, _| !k.starts_with(&prefix)),
+            }
+        }
+    }
+
     pub fn set(&self, key: impl Into<String>, value: Value) {
         let entry = Entry {
             value,
@@ -123,6 +200,42 @@ impl StoreWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clear_source_older_than_keeps_fresh_and_foreign_keys() {
+        let store = Store::new();
+        store.writer("a").set("a:old", Value::Bool(true));
+        store.writer("b").set("b:x", Value::Bool(true));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let t = SystemTime::now();
+        store.writer("a").set("a:new", Value::Bool(true));
+        assert_eq!(store.clear_source_older_than("a", t), 1);
+        let mut keys: Vec<_> = store.snapshot().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, vec!["a:new", "b:x"]);
+    }
+
+    #[test]
+    fn apply_sets_and_removes_atomically() {
+        let store = Store::new();
+        let w = store.writer("t");
+        w.set("a:x.1", Value::Bool(true));
+        w.set("a:x.2", Value::Bool(true));
+        w.set("a:y", Value::Bool(true));
+        let before = store.snapshot();
+        w.apply(vec![
+            Change::RemovePrefix("a:x.".into()),
+            Change::Set("a:z".into(), Value::Text("hi".into())),
+            Change::Remove("a:y".into()),
+        ]);
+        assert_eq!(before.len(), 3);
+        let after = store.snapshot();
+        let mut keys: Vec<_> = after.keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, vec!["a:z"]);
+        w.remove("a:z");
+        assert!(store.snapshot().is_empty());
+    }
 
     #[test]
     fn snapshots_are_isolated_from_later_writes() {
