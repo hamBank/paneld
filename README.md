@@ -100,7 +100,17 @@ A `condition` is a small expression over store keys:
 
 Conditions are parsed when the config loads; errors name the scene and the expression.
 
-### Live reload
+### Data sources
+
+Sources (`[sources.<name>]`, each with a `type`) write store keys that widgets and conditions read. They run in the background and are restarted with backoff if they fail. The render loop never waits on them.
+
+| `type` | What it does |
+|---|---|
+| `static` | Writes fixed values once, e.g. `values = { "demo:temp" = 21.5, "demo:on" = true }`. Useful for laying out scenes. |
+
+Home Assistant, aircraft (adsb.fi), MQTT, HTTP polling and Prometheus sources arrive in M3. Keep personal settings (location, entity IDs) in a git-ignored `config/local.toml`.
+
+## Live reload
 
 `paneld run` picks up edits to the config file without a restart. The file is polled once a second; a change is applied once the file has had the same new content on two consecutive polls (so a half-written save is not parsed, and touching the file without changing it does nothing), which means a reload takes about two seconds. On unix, `kill -HUP <pid>` reloads immediately. Editors that save in place or by rename-and-replace both work. The new config is fully parsed, validated and prepared (including decoding images) off the render thread, then swapped in between two frames; the playlist restarts at its first eligible scene and widget state (scroll position, GIF frame) starts over.
 

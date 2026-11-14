@@ -193,14 +193,22 @@ Applied per sink (so the preview can show "true" colours while the panel gets co
 `Source` trait, each running as its own tokio task, writing into the store:
 
 ```rust
-#[async_trait]
-trait Source {
-    fn name(&self) -> &str;
-    async fn run(self: Box<Self>, store: StoreWriter, shutdown: CancellationToken) -> anyhow::Result<()>;
+// As built (crates/paneld/src/sources/mod.rs). No async-trait or tokio-util:
+// a boxed future and our own `Shutdown` (a tokio watch channel) do the job.
+pub trait Source: Send {
+    fn run(self: Box<Self>, ctx: SourceCtx) -> SourceFuture; // Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>
 }
+pub struct SourceCtx { pub name: Arc<str>, pub store: StoreWriter, pub shutdown: Shutdown, pub health: Arc<SourceHealth> }
 ```
 
-Supervisor restarts failed sources with backoff and reports health in metrics.
+- **Config:** each `[sources.<name>]` has a required `type`.
+- **Supervisor:** rebuilds a failed source from its config and restarts it, with backoff of 1 s doubling to 60 s. The backoff resets after a run of 60 s.
+- **Health:** each source has `up`, `errors`, `restarts` and `last_ok`, for `/metrics` in M5. Sources report a recoverable error with `ctx.error()`, a success with `ctx.ok()`, and return `Err` only to be restarted.
+- **Writes:** `StoreWriter::apply` sets and removes several keys under one lock, so the render loop never sees half an update.
+- **Subscriptions:** `Config::referenced_keys()` lists the keys the scenes read, so a source can subscribe only to those.
+- **One HTTP/TLS stack:** `reqwest` and `tokio-tungstenite` (HA WebSocket), both on rustls with the `ring` provider (`crate::tls::init`), never `aws-lc-rs`. `ring` only needs a C cross-compiler for the Pi (CI installs `gcc-aarch64-linux-gnu`), not CMake. All HTTP goes through `sources::http_client()`, whose User-Agent is a generic `paneld/<version>`.
+- **Hot reload:** a change to `[sources]` currently needs a restart; it logs a warning. Restarting only the changed sources on reload is a follow-up.
+- **`type = "static"`:** fixed values written once, for demos and laying out scenes.
 
 Initial sources:
 1. **Home Assistant WebSocket**: authenticate with a long-lived token (env var, never in config), `subscribe_entities` or `subscribe_events(state_changed)` filtered to the entity IDs the config references. Keys: `ha:<entity_id>` plus `ha:<entity_id>.<attribute>`. Details for M3:
@@ -359,6 +367,7 @@ discovery_prefix = "homeassistant"
 node_id = "paneld"
 
 [sources.ha]
+type = "home_assistant"
 url = "ws://homeassistant.local:8123/api/websocket"
 token_env = "PANELD_HA_TOKEN"
 

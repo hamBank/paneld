@@ -641,3 +641,67 @@ fn font_scale_must_be_1_to_8() {
     ));
     assert!(ok.is_ok());
 }
+
+#[test]
+fn sources_parse_and_validate() {
+    let cfg = Config::parse(&format!(
+        "{MINIMAL}[sources.demo]\ntype = \"static\"\nvalues = {{ \"demo:t\" = 21.5, \"demo:n\" = 3, \"demo:s\" = \"hi\", \"demo:b\" = false }}\n"
+    ))
+    .unwrap();
+    let paneld::config::SourceConfig::Static(s) = &cfg.sources["demo"];
+    use paneld::config::StaticValue;
+    assert_eq!(s.values["demo:t"], StaticValue::Number(21.5));
+    assert_eq!(s.values["demo:n"], StaticValue::Number(3.0));
+    assert_eq!(s.values["demo:s"], StaticValue::Text("hi".into()));
+    assert_eq!(s.values["demo:b"], StaticValue::Bool(false));
+
+    let e = err(&format!(
+        "{MINIMAL}[sources.\"bad name\"]\ntype = \"static\"\nvalues = {{ \"nocolon\" = 1 }}\n"
+    ));
+    assert!(
+        e.contains("sources.bad name: source names may only use letters, digits, '_' and '-'"),
+        "{e}"
+    );
+    assert!(
+        e.contains(r#"sources.bad name: "nocolon" is not a valid key"#),
+        "{e}"
+    );
+    let e = err(&format!("{MINIMAL}[sources.x]\ntype = \"nope\"\n"));
+    assert!(e.contains("unknown variant `nope`"), "{e}");
+    let e = err(&format!("{MINIMAL}[sources.x]\nvalues = {{}}\n"));
+    assert!(e.contains("missing field `type`"), "{e}");
+}
+
+#[test]
+fn referenced_keys_cover_widgets_and_conditions() {
+    let cfg = Config::parse(
+        r#"
+[canvas]
+width = 64
+height = 32
+[[scene]]
+name = "a"
+condition = "ha:binary_sensor.home && aircraft:count > 0"
+  [[scene.zone]]
+  rect = { x = 0, y = 0, w = 32, h = 16 }
+  widget = { type = "value", key = "ha:sensor.t" }
+  [[scene.zone]]
+  rect = { x = 0, y = 16, w = 32, h = 16 }
+  widget = { type = "sparkline", key = "ha:sensor.p@series" }
+  [[scene.zone]]
+  rect = { x = 32, y = 0, w = 32, h = 32 }
+  widget = { type = "clock" }
+"#,
+    )
+    .unwrap();
+    let keys: Vec<_> = cfg.referenced_keys().into_iter().collect();
+    assert_eq!(
+        keys,
+        vec![
+            "aircraft:count",
+            "ha:binary_sensor.home",
+            "ha:sensor.p@series",
+            "ha:sensor.t"
+        ]
+    );
+}

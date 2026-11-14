@@ -47,11 +47,40 @@ pub struct Config {
     pub fonts: Vec<FontConfig>,
     #[serde(default, rename = "scene")]
     pub scenes: Vec<SceneConfig>,
+    /// Data sources by name (`[sources.<name>]`, DESIGN.md §6). Each writes
+    /// store keys; by convention keys start with a prefix naming the kind of
+    /// source (`ha:`, `aircraft:`, `demo:`).
+    #[serde(default)]
+    pub sources: std::collections::BTreeMap<String, SourceConfig>,
     /// Directory relative media and font paths are resolved against: the config file's
     /// directory for [`Config::load`], the working directory for
     /// [`Config::parse`].
     #[serde(skip)]
     pub base_dir: PathBuf,
+}
+
+/// One `[sources.<name>]` entry, selected by `type`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SourceConfig {
+    /// Fixed values written once (`sources/static_values.rs`).
+    Static(StaticSourceConfig),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StaticSourceConfig {
+    /// Store key → value, e.g. `{ "demo:temp" = 21.5, "demo:on" = true }`.
+    pub values: std::collections::BTreeMap<String, StaticValue>,
+}
+
+/// A TOML scalar for the static source.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum StaticValue {
+    Bool(bool),
+    Number(f64),
+    Text(String),
 }
 
 /// A BDF font file made available under a name (`[[font]]`).
@@ -711,6 +740,36 @@ impl Config {
         })
     }
 
+    /// Every store key the scenes read: widget `key`s and the keys in scene
+    /// conditions. Sources use it to subscribe only to what is shown (e.g.
+    /// the Home Assistant source's entity IDs). Text templates add theirs
+    /// once templating exists.
+    pub fn referenced_keys(&self) -> std::collections::BTreeSet<String> {
+        let mut keys = std::collections::BTreeSet::new();
+        for s in &self.scenes {
+            if let Some(c) = s
+                .condition
+                .as_deref()
+                .and_then(|c| crate::condition::Condition::parse(c).ok())
+            {
+                keys.extend(c.keys().into_iter().map(str::to_owned));
+            }
+            for z in &s.zones {
+                match &z.widget {
+                    WidgetConfig::Value(v) => {
+                        keys.insert(v.key.clone());
+                    }
+                    WidgetConfig::Sparkline(sp) => {
+                        keys.insert(sp.key.clone());
+                    }
+                    WidgetConfig::Image(i) => keys.extend(i.key.clone()),
+                    WidgetConfig::Clock(_) | WidgetConfig::Text(_) => {}
+                }
+            }
+        }
+        keys
+    }
+
     pub fn validate(&self) -> Result<(), ConfigErrors> {
         let mut errs = Vec::new();
         let c = &self.canvas;
@@ -801,6 +860,35 @@ impl Config {
             errs.push("at least one [[scene]] is required".into());
         }
         let mut names = HashSet::new();
+        for (name, src) in &self.sources {
+            let at = format!("sources.{name}");
+            if name.is_empty()
+                || !name
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+            {
+                errs.push(format!(
+                    "{at}: source names may only use letters, digits, '_' and '-'"
+                ));
+            }
+            match src {
+                SourceConfig::Static(c) => {
+                    for (key, v) in &c.values {
+                        if !crate::condition::is_valid_key(key) {
+                            errs.push(format!(
+                                "{at}: {key:?} is not a valid key; keys look like `source:name`"
+                            ));
+                        }
+                        if let StaticValue::Number(n) = v {
+                            if !n.is_finite() {
+                                errs.push(format!("{at}: {key:?} must be a finite number"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         for s in &self.scenes {
             if s.name.trim().is_empty() {
                 errs.push("scene: name must not be empty".into());

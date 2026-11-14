@@ -11,8 +11,7 @@ use std::time::SystemTime;
 
 use crate::media::Bitmap;
 
-/// A stored value. More variants (`Json`) arrive with the widgets
-/// and sources that need them.
+/// A stored value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Number {
@@ -29,6 +28,9 @@ pub enum Value {
     /// A decoded image. Shared, so cloning a value or a snapshot is cheap and
     /// widgets can tell a new image from the old one by pointer.
     Image(Arc<Bitmap>),
+    /// Structured data a source wants to keep whole (e.g. the aircraft list).
+    /// Shared, so snapshot clones stay cheap.
+    Json(Arc<serde_json::Value>),
 }
 
 /// A value plus where and when it came from, so widgets can show staleness.
@@ -73,7 +75,51 @@ pub struct StoreWriter {
     source: Arc<str>,
 }
 
+/// One change in a [`StoreWriter::apply`] batch.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Change {
+    Set(String, Value),
+    Remove(String),
+    /// Remove every key starting with this prefix.
+    RemovePrefix(String),
+}
+
 impl StoreWriter {
+    /// Remove `key`. Widgets then show their missing-value placeholder and
+    /// conditions on it are false.
+    pub fn remove(&self, key: &str) {
+        self.apply(vec![Change::Remove(key.to_owned())]);
+    }
+
+    /// Apply several changes under one write lock, so a snapshot sees all of
+    /// them or none (e.g. every `aircraft:nearest.*` key of one poll).
+    pub fn apply(&self, changes: Vec<Change>) {
+        if changes.is_empty() {
+            return;
+        }
+        let now = SystemTime::now();
+        let mut guard = self.store.inner.write().unwrap_or_else(|e| e.into_inner());
+        let map = Arc::make_mut(&mut guard);
+        for c in changes {
+            match c {
+                Change::Set(key, value) => {
+                    map.insert(
+                        key,
+                        Entry {
+                            value,
+                            updated_at: now,
+                            source: self.source.clone(),
+                        },
+                    );
+                }
+                Change::Remove(key) => {
+                    map.remove(&key);
+                }
+                Change::RemovePrefix(prefix) => map.retain(|k, _| !k.starts_with(&prefix)),
+            }
+        }
+    }
+
     pub fn set(&self, key: impl Into<String>, value: Value) {
         let entry = Entry {
             value,
@@ -123,6 +169,28 @@ impl StoreWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apply_sets_and_removes_atomically() {
+        let store = Store::new();
+        let w = store.writer("t");
+        w.set("a:x.1", Value::Bool(true));
+        w.set("a:x.2", Value::Bool(true));
+        w.set("a:y", Value::Bool(true));
+        let before = store.snapshot();
+        w.apply(vec![
+            Change::RemovePrefix("a:x.".into()),
+            Change::Set("a:z".into(), Value::Text("hi".into())),
+            Change::Remove("a:y".into()),
+        ]);
+        assert_eq!(before.len(), 3);
+        let after = store.snapshot();
+        let mut keys: Vec<_> = after.keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, vec!["a:z"]);
+        w.remove("a:z");
+        assert!(store.snapshot().is_empty());
+    }
 
     #[test]
     fn snapshots_are_isolated_from_later_writes() {

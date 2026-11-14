@@ -134,6 +134,10 @@ pub struct RestartOnly {
     /// Colorlight sinks, including gamma, brightness and colour order) are
     /// set up once at start-up.
     outputs: String,
+    /// `Debug` rendering of `[sources]`. Sources are started once at
+    /// start-up; restarting just the changed ones on reload is a follow-up
+    /// (DESIGN.md §7.3).
+    sources: String,
 }
 
 impl RestartOnly {
@@ -143,6 +147,7 @@ impl RestartOnly {
             fps: cfg.canvas.fps,
             http_bind: cfg.http.bind,
             outputs: format!("{:?}", cfg.outputs),
+            sources: format!("{:?}", cfg.sources),
         }
     }
 
@@ -157,6 +162,9 @@ impl RestartOnly {
         }
         if self.outputs != new.outputs {
             v.push("[[output]]");
+        }
+        if self.sources != new.sources {
+            v.push("[sources]");
         }
         v
     }

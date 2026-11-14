@@ -390,7 +390,7 @@ impl Parser {
 }
 
 /// `source:name`, both parts non-empty.
-fn is_valid_key(w: &str) -> bool {
+pub fn is_valid_key(w: &str) -> bool {
     match w.split_once(':') {
         Some((source, name)) => !source.is_empty() && !name.is_empty(),
         None => false,
@@ -424,6 +424,24 @@ impl Condition {
 
     /// Evaluate against a snapshot. See the module docs for the handling of
     /// missing keys and type mismatches (both make a comparison `false`).
+    /// Every store key the condition reads (sources use this to know what
+    /// to subscribe to).
+    pub fn keys(&self) -> Vec<&str> {
+        fn walk<'a>(e: &'a Expr, out: &mut Vec<&'a str>) {
+            match e {
+                Expr::Truthy(k) | Expr::Compare(k, _, _) => out.push(k),
+                Expr::Not(a) => walk(a, out),
+                Expr::And(a, b) | Expr::Or(a, b) => {
+                    walk(a, out);
+                    walk(b, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.0, &mut out);
+        out
+    }
+
     pub fn eval(&self, store: &StoreSnapshot) -> bool {
         eval(&self.0, store)
     }
@@ -474,6 +492,12 @@ fn compare(v: &Value, op: Op, lit: &Literal) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keys_lists_every_key_read() {
+        let c = Condition::parse("!(ha:a > 1) && (prom:b || weather:c == 'x')").unwrap();
+        assert_eq!(c.keys(), vec!["ha:a", "prom:b", "weather:c"]);
+    }
     use crate::store::Store;
 
     fn snap(entries: &[(&str, Value)]) -> StoreSnapshot {
