@@ -17,6 +17,7 @@
 //!   config (`*_env`).
 //! - HTTP: use [`http_client`] (one TLS stack for the whole daemon).
 
+pub mod ha;
 pub mod static_values;
 
 use std::collections::BTreeMap;
@@ -46,7 +47,19 @@ pub trait Source: Send {
 pub fn build(name: &str, cfg: &SourceConfig) -> anyhow::Result<Box<dyn Source>> {
     match cfg {
         SourceConfig::Static(c) => Ok(Box::new(static_values::StaticSource::new(name, c))),
+        SourceConfig::HomeAssistant(c) => Ok(Box::new(ha::HaSource::new(c)?)),
     }
+}
+
+/// Fail early, at `run` start, when a source needs an environment variable
+/// (a token) that is not set. Names the variable, never a value.
+pub fn check_environment(cfg: &Config) -> anyhow::Result<()> {
+    for (name, scfg) in &cfg.sources {
+        if let SourceConfig::HomeAssistant(c) = scfg {
+            ha::read_token(&c.token_env).map_err(|e| anyhow::anyhow!("[sources.{name}]: {e}"))?;
+        }
+    }
+    Ok(())
 }
 
 /// Everything a running source gets.
@@ -133,10 +146,15 @@ impl Supervisor {
         let (stop, rx) = watch::channel(false);
         let mut tasks = Vec::new();
         let mut health = BTreeMap::new();
+        let referenced = cfg.referenced_keys();
         for (name, scfg) in &cfg.sources {
             let h = Arc::new(SourceHealth::default());
             health.insert(name.clone(), h.clone());
-            let (n, c) = (name.clone(), scfg.clone());
+            let (n, mut c) = (name.clone(), scfg.clone());
+            if let SourceConfig::HomeAssistant(ha) = &mut c {
+                // Tell the source which keys the scenes read (see `ha.rs`).
+                ha.referenced = referenced.clone();
+            }
             tasks.push(tokio::spawn(supervise(
                 name.clone(),
                 move || build(&n, &c),

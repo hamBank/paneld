@@ -35,6 +35,22 @@ grid = true
 # More source types arrive in M3: home_assistant, aircraft, mqtt, http_poll,
 # prometheus. Put personal settings (your location, entity IDs) in a
 # git-ignored config/local.toml, never in this file.
+# Home Assistant: create a long-lived token (profile > Security) and put it in
+# the environment variable named by token_env; the token never goes in a file.
+# Only entities the scenes use (plus `entities`, `series`, `forecasts`) are
+# subscribed. Keys: ha:<entity_id>, ha:<entity_id>.<attribute>,
+# ha:<entity_id>@series, ha:<entity_id>.forecast.<n>.<field>.
+# [sources.ha]
+# type = "home_assistant"
+# url = "ws://homeassistant.local:8123/api/websocket"   # ws:// or wss://
+# token_env = "HA_TOKEN"
+# entities = ["sensor.inverter_ac_power"]    # extra entities to subscribe to
+# series = ["sensor.outdoor_temperature"]    # keep ha:<id>@series for sparklines
+# series_points = 288                        # points kept per series
+# forecasts = ["weather.home"]               # fetch weather.get_forecasts
+# forecast_type = "daily"                    # or "hourly"
+# forecast_interval_s = 1800
+# forecast_len = 5                           # periods written (0 = soonest)
 # [sources.demo]
 # type = "static"            # fixed values, written once at start
 # values = { "ha:sensor.outside_temperature" = 21.5 }

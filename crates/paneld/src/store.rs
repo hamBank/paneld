@@ -85,6 +85,12 @@ pub enum Change {
 }
 
 impl StoreWriter {
+    /// Current contents of the whole store (for a source that must resume
+    /// from what an earlier run wrote, e.g. a rolling series).
+    pub fn snapshot(&self) -> StoreSnapshot {
+        self.store.snapshot()
+    }
+
     /// Remove `key`. Widgets then show their missing-value placeholder and
     /// conditions on it are false.
     pub fn remove(&self, key: &str) {

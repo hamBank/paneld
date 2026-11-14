@@ -108,7 +108,28 @@ Sources (`[sources.<name>]`, each with a `type`) write store keys that widgets a
 |---|---|
 | `static` | Writes fixed values once, e.g. `values = { "demo:temp" = 21.5, "demo:on" = true }`. Useful for laying out scenes. |
 
-Home Assistant, aircraft (adsb.fi), MQTT, HTTP polling and Prometheus sources arrive in M3. Keep personal settings (location, entity IDs) in a git-ignored `config/local.toml`.
+| `home_assistant` | Entity states, weather forecasts and rolling series over the HA WebSocket API. See below. |
+
+Aircraft (adsb.fi), MQTT, HTTP polling and Prometheus sources arrive in M3. Keep personal settings (location, entity IDs) in a git-ignored `config/local.toml`.
+
+#### Home Assistant setup
+
+1. In Home Assistant, open your profile, then Security, and create a **long-lived access token**.
+2. Put it in an environment variable, for example `export HA_TOKEN=...` or an `EnvironmentFile=` in the systemd unit. The config only names the variable (`token_env = "HA_TOKEN"`); the token is never read from the config, logged or shown. `paneld run` refuses to start if the variable is not set.
+3. Add the source:
+
+```toml
+[sources.ha]
+type = "home_assistant"
+url = "ws://homeassistant.local:8123/api/websocket"   # ws:// or wss://
+token_env = "HA_TOKEN"
+series = ["sensor.outdoor_temperature"]   # optional: also keep ha:<id>@series
+forecasts = ["weather.home"]              # optional: weather.get_forecasts
+```
+
+Only the entities your scenes use are subscribed (every `ha:<entity_id>…` key in a widget or condition), plus `entities`, `series` and `forecasts`. Optional settings: `entities` (extra entity IDs), `series_points` (288), `forecast_type` (`daily` or `hourly`), `forecast_interval_s` (1800), `forecast_len` (5).
+
+Keys: `ha:<entity_id>` is a number (with the entity's `unit_of_measurement`) or text; `unavailable`/`unknown` remove it. `ha:<entity_id>.<attribute>` holds an attribute (number, text, bool, or JSON for lists and objects). `ha:<entity_id>@series` is a rolling series for sparklines. `ha:<entity_id>.forecast.<n>.<field>` (`n = 0` soonest) and `ha:<entity_id>.forecast` (JSON) hold forecasts. If the connection drops, the last values stay and show as stale; the source reconnects with backoff. Changing the source config or the entities your scenes use takes a restart.
 
 ### Live reload
 

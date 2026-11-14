@@ -65,6 +65,72 @@ pub struct Config {
 pub enum SourceConfig {
     /// Fixed values written once (`sources/static_values.rs`).
     Static(StaticSourceConfig),
+    /// Home Assistant WebSocket API (`sources/ha.rs`).
+    HomeAssistant(HaConfig),
+}
+
+/// `type = "home_assistant"`. The long-lived access token is never in the
+/// config: `token_env` names the environment variable that holds it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HaConfig {
+    /// WebSocket URL, `ws://` or `wss://`, e.g. `ws://homeassistant.local:8123/api/websocket`.
+    pub url: String,
+    /// Name of the environment variable holding the long-lived access token.
+    pub token_env: String,
+    /// Extra entity IDs to subscribe to, beyond those the scenes use.
+    #[serde(default)]
+    pub entities: Vec<String>,
+    /// Entities that also get a rolling `ha:<entity_id>@series`.
+    #[serde(default)]
+    pub series: Vec<String>,
+    /// Maximum points kept per series.
+    #[serde(default = "default_series_points")]
+    pub series_points: usize,
+    /// Weather entities whose forecast is fetched with `weather.get_forecasts`.
+    #[serde(default)]
+    pub forecasts: Vec<String>,
+    #[serde(default)]
+    pub forecast_type: ForecastType,
+    /// Seconds between forecast fetches.
+    #[serde(default = "default_forecast_interval_s")]
+    pub forecast_interval_s: u64,
+    /// Forecast periods written as `ha:<entity>.forecast.<n>.<field>`.
+    #[serde(default = "default_forecast_len")]
+    pub forecast_len: usize,
+    /// Every store key the scenes read, filled in by the supervisor so the
+    /// source can subscribe only to the entities that are shown. Not part of
+    /// the TOML.
+    #[serde(skip)]
+    pub referenced: std::collections::BTreeSet<String>,
+}
+
+fn default_series_points() -> usize {
+    288
+}
+fn default_forecast_interval_s() -> u64 {
+    1800
+}
+fn default_forecast_len() -> usize {
+    5
+}
+
+/// Which `weather.get_forecasts` `type` to request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForecastType {
+    #[default]
+    Daily,
+    Hourly,
+}
+
+impl ForecastType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ForecastType::Daily => "daily",
+            ForecastType::Hourly => "hourly",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -872,6 +938,7 @@ impl Config {
                 ));
             }
             match src {
+                SourceConfig::HomeAssistant(c) => crate::sources::ha::validate(c, &at, &mut errs),
                 SourceConfig::Static(c) => {
                     for (key, v) in &c.values {
                         if !crate::condition::is_valid_key(key) {

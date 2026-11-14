@@ -648,7 +648,9 @@ fn sources_parse_and_validate() {
         "{MINIMAL}[sources.demo]\ntype = \"static\"\nvalues = {{ \"demo:t\" = 21.5, \"demo:n\" = 3, \"demo:s\" = \"hi\", \"demo:b\" = false }}\n"
     ))
     .unwrap();
-    let paneld::config::SourceConfig::Static(s) = &cfg.sources["demo"];
+    let paneld::config::SourceConfig::Static(s) = &cfg.sources["demo"] else {
+        panic!("expected a static source");
+    };
     use paneld::config::StaticValue;
     assert_eq!(s.values["demo:t"], StaticValue::Number(21.5));
     assert_eq!(s.values["demo:n"], StaticValue::Number(3.0));
@@ -704,4 +706,31 @@ condition = "ha:binary_sensor.home && aircraft:count > 0"
             "ha:sensor.t"
         ]
     );
+}
+
+#[test]
+fn home_assistant_source_parses_and_validates() {
+    let cfg = Config::parse(&format!(
+        "{MINIMAL}[sources.ha]\ntype = \"home_assistant\"\nurl = \"ws://homeassistant.local:8123/api/websocket\"\ntoken_env = \"HA_TOKEN\"\nseries = [\"sensor.outdoor_temperature\"]\nforecasts = [\"weather.home\"]\nforecast_type = \"hourly\"\n"
+    ))
+    .unwrap();
+    let paneld::config::SourceConfig::HomeAssistant(c) = &cfg.sources["ha"] else {
+        panic!("expected a home_assistant source");
+    };
+    assert_eq!(c.token_env, "HA_TOKEN");
+    assert_eq!(c.series_points, 288);
+    assert_eq!(c.forecast_len, 5);
+    assert_eq!(c.forecast_interval_s, 1800);
+    assert_eq!(c.forecast_type, paneld::config::ForecastType::Hourly);
+
+    let e = err(&format!(
+        "{MINIMAL}[sources.ha]\ntype = \"home_assistant\"\nurl = \"http://x\"\ntoken_env = \"not a name\"\n"
+    ));
+    assert!(e.contains("sources.ha") && e.contains("ws://"), "{e}");
+    assert!(e.contains("NAME of an environment variable"), "{e}");
+    // token_env and url are required.
+    assert!(Config::parse(&format!(
+        "{MINIMAL}[sources.ha]\ntype = \"home_assistant\"\nurl = \"ws://x\"\n"
+    ))
+    .is_err());
 }
