@@ -375,8 +375,15 @@ fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
     let reload_stats = std::sync::Arc::new(reload::ReloadStats::default());
     paneld::tls::init();
     let store = Store::new();
+    // Control plane (M4): one handle for every control surface; the output
+    // level (on/off, brightness) is for the sinks.
+    let (control, control_link, output_level) =
+        paneld::control::channel(cfg.scenes.iter().map(|s| s.name.clone()).collect());
+    // TODO(M4 brightness): hand `output_level` to the sinks.
+    let _output_level = output_level;
     let render = RenderLoop::from_config(&cfg, scene.as_deref(), store.clone())?
         .with_reload(reload_rx)
+        .with_control(control_link)
         .spawn(tx)
         .context("starting render thread")?;
 
@@ -394,7 +401,7 @@ fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
         })
         .collect::<anyhow::Result<_>>()?;
 
-    let mut app = Router::new();
+    let mut app = Router::new().merge(paneld::api::router(control.clone()));
     if let Some(p) = cfg.preview() {
         app = app.merge(preview::router(
             rx,

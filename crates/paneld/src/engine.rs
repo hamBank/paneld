@@ -16,6 +16,7 @@ use anyhow::Context;
 
 use crate::canvas::Canvas;
 use crate::config::Config;
+use crate::control::{Command, ControlLink, OutputLevel, Status};
 use crate::scene::Scene;
 use crate::scheduler::Scheduler;
 use crate::store::Store;
@@ -87,6 +88,31 @@ pub struct RenderLoop {
     /// Prepared scene sets from the config reloader. Polled without blocking
     /// at the top of every frame.
     pub reload: Option<Receiver<SceneSet>>,
+    /// Control plane (M4): commands in, status and output level out.
+    pub control: Option<ControlLink>,
+    /// Runtime state set through the control plane.
+    pub state: RuntimeState,
+}
+
+/// What the control plane has set; survives config reloads.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuntimeState {
+    /// Pinned scene by name (re-resolved after a reload).
+    pub pinned: Option<String>,
+    pub on: bool,
+    pub brightness: u8,
+    pub dim: u8,
+}
+
+impl Default for RuntimeState {
+    fn default() -> Self {
+        RuntimeState {
+            pinned: None,
+            on: true,
+            brightness: 255,
+            dim: 255,
+        }
+    }
 }
 
 /// Handle to a running render loop. Dropping it does not stop the loop;
@@ -126,7 +152,81 @@ impl RenderLoop {
             scheduler: set.scheduler,
             store,
             reload: None,
+            control: None,
+            state: RuntimeState::default(),
         })
+    }
+
+    /// Take commands from, and publish status and output level to, the
+    /// control plane (`control::channel`).
+    pub fn with_control(mut self, link: ControlLink) -> Self {
+        self.control = Some(link);
+        self
+    }
+
+    /// Apply every queued control command. Never blocks.
+    fn apply_commands(&mut self, now: Instant) {
+        let Some(link) = &self.control else { return };
+        let mut output_changed = false;
+        while let Ok(cmd) = link.commands.try_recv() {
+            match cmd {
+                Command::Pin(Some(name)) => {
+                    match self.scenes.iter().position(|s| s.name() == name) {
+                        Some(i) => {
+                            self.scheduler.pin(Some(i), now);
+                            tracing::info!(scene = %name, "scene pinned");
+                            self.state.pinned = Some(name);
+                        }
+                        None => tracing::warn!(scene = %name, "cannot pin: no such scene"),
+                    }
+                }
+                Command::Pin(None) => {
+                    if self.state.pinned.take().is_some() {
+                        self.scheduler.pin(None, now);
+                        tracing::info!("scene pin released");
+                    }
+                }
+                Command::Notify(_) | Command::ClearNotifications => {
+                    // TODO(M4 notifications): queue in the scheduler.
+                    tracing::warn!("notifications are not implemented yet");
+                }
+                Command::SetPower(on) => {
+                    output_changed |= self.state.on != on;
+                    self.state.on = on;
+                }
+                Command::SetBrightness(b) => {
+                    output_changed |= self.state.brightness != b;
+                    self.state.brightness = b;
+                }
+                Command::SetDim(d) => {
+                    output_changed |= self.state.dim != d;
+                    self.state.dim = d;
+                }
+            }
+        }
+        if output_changed {
+            let level =
+                OutputLevel::from_parts(self.state.on, self.state.brightness, self.state.dim);
+            link.output.send_replace(level);
+        }
+    }
+
+    /// Publish the status if it differs from the last one.
+    fn publish_status(&self, scene: Option<usize>, fps: f32) {
+        let Some(link) = &self.control else { return };
+        let status = Status {
+            scenes: self.scenes.iter().map(|s| s.name().to_owned()).collect(),
+            scene: scene.map(|i| self.scenes[i].name().to_owned()),
+            pinned: self.state.pinned.clone(),
+            notifications: Vec::new(),
+            on: self.state.on,
+            brightness: self.state.brightness,
+            dim: self.state.dim,
+            fps,
+        };
+        if **link.status.borrow() != status {
+            link.status.send_replace(Arc::new(status));
+        }
     }
 
     /// Take prepared scene sets from `rx` (config hot reload).
@@ -157,6 +257,16 @@ impl RenderLoop {
         self.scenes = set.scenes;
         self.scheduler = set.scheduler;
         tracing::info!("config reloaded: {} scenes", self.scenes.len());
+        // Keep a pin across the reload, by name.
+        if let Some(name) = &self.state.pinned {
+            match self.scenes.iter().position(|s| s.name() == name) {
+                Some(i) => self.scheduler.pin(Some(i), Instant::now()),
+                None => {
+                    tracing::warn!(scene = %name, "pinned scene is gone after reload; pin released");
+                    self.state.pinned = None;
+                }
+            }
+        }
         true
     }
 
@@ -182,6 +292,8 @@ impl RenderLoop {
         // Scene shown last frame; `None` means black (nothing eligible). The
         // outer Option is "no frame yet", so the first frame always logs.
         let mut shown: Option<Option<usize>> = None;
+        // Frames in the current one-second window, for the status `fps`.
+        let (mut fps_window, mut fps_frames, mut fps) = (Instant::now(), 0u32, 0f32);
         tracing::info!(
             fps = self.fps,
             scenes = self.scenes.len(),
@@ -199,6 +311,7 @@ impl RenderLoop {
                 // and name match the old one.
                 shown = None;
             }
+            self.apply_commands(Instant::now());
 
             let snapshot = self.store.snapshot();
             let active = self.scheduler.tick(Instant::now(), &snapshot);
@@ -210,6 +323,14 @@ impl RenderLoop {
                 }
                 shown = Some(current);
             }
+
+            fps_frames += 1;
+            let since = fps_window.elapsed();
+            if since >= Duration::from_secs(1) {
+                fps = fps_frames as f32 / since.as_secs_f32();
+                (fps_window, fps_frames) = (Instant::now(), 0);
+            }
+            self.publish_status(current, (fps * 10.0).round() / 10.0);
 
             let mut canvas = Canvas::new(self.width, self.height);
             if let Some(a) = active {
@@ -245,6 +366,78 @@ mod tests {
     use crate::config::Config;
 
     #[test]
+    fn control_commands_pin_and_set_the_output_level() {
+        let cfg = Config::parse(
+            r##"
+            [canvas]
+            width = 8
+            height = 8
+            fps = 60
+            [[scene]]
+            name = "a"
+            [[scene]]
+            name = "b"
+            condition = "x:never"
+            "##,
+        )
+        .unwrap();
+        let (control, link, mut output) =
+            crate::control::channel(cfg.scenes.iter().map(|s| s.name.clone()).collect());
+        let (tx, _rx) = frame_channel(8, 8);
+        let handle = RenderLoop::from_config(&cfg, None, Store::new())
+            .unwrap()
+            .with_control(link)
+            .spawn(tx)
+            .unwrap();
+        let mut status = control.subscribe();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let wait = |status: &mut watch::Receiver<Arc<Status>>, f: &dyn Fn(&Status) -> bool| {
+            rt.block_on(async {
+                tokio::time::timeout(Duration::from_secs(5), status.wait_for(|s| f(s)))
+                    .await
+                    .expect("status within 5 s")
+                    .unwrap();
+            })
+        };
+        wait(&mut status, &|s| s.scene.as_deref() == Some("a"));
+
+        // Pin the never-eligible scene: it shows anyway.
+        control.send(Command::Pin(Some("b".into()))).unwrap();
+        wait(&mut status, &|s| {
+            s.scene.as_deref() == Some("b") && s.pinned.as_deref() == Some("b")
+        });
+        control.send(Command::Pin(Some("nope".into()))).unwrap();
+        control.send(Command::Pin(None)).unwrap();
+        wait(&mut status, &|s| {
+            s.scene.as_deref() == Some("a") && s.pinned.is_none()
+        });
+
+        control.send(Command::SetBrightness(128)).unwrap();
+        control.send(Command::SetDim(128)).unwrap();
+        control.send(Command::SetPower(false)).unwrap();
+        wait(&mut status, &|s| {
+            !s.on && s.brightness == 128 && s.dim == 128
+        });
+        rt.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), output.wait_for(|o| !o.on))
+                .await
+                .unwrap()
+                .unwrap();
+        });
+        assert_eq!(
+            *output.borrow(),
+            OutputLevel {
+                on: false,
+                level: 64
+            }
+        );
+        handle.stop();
+    }
+
+    #[test]
     fn produces_frames_and_stops() {
         let cfg = Config::parse(
             r##"
@@ -270,6 +463,8 @@ mod tests {
             scheduler: Scheduler::from_config(&cfg, &[0]).unwrap(),
             store: Store::new(),
             reload: None,
+            control: None,
+            state: RuntimeState::default(),
         }
         .spawn(tx)
         .unwrap();

@@ -327,6 +327,18 @@ A local source can poll every 1 s, since there is no external limit. Internally 
 
 ## 7. Control plane
 
+**Shared core (as built, `control.rs`).** Every control surface uses one cloneable `Control` handle: the HTTP API, the MQTT/HA entities and the auto-dim task. It covers three things:
+- **Commands** go over a std channel to the render loop, which applies them at the top of the next frame without blocking:
+  - `Notify`, `ClearNotifications`;
+  - `Pin(Some(name) | None)`;
+  - `SetPower`, `SetBrightness(0–255)`, and `SetDim(0–255)` from auto-dim.
+- **`Status`** comes back on a `watch` channel, re-published only when it changes, and is serialised as-is for `GET /api/state`. It holds the scenes, the scene on screen, the pin, the notification queue, on/off, brightness, dim and the actual fps.
+- **`OutputLevel { on, level }`** goes to the sinks on another `watch`:
+  - `level = brightness × dim / 255`, and each output's configured `brightness` is its calibrated maximum, scaled by `level / 255`;
+  - off means black, and hardware brightness 0 where the sink supports it.
+- **Notification requests** have the same JSON shape on HTTP and MQTT: `text` (with optional `icon` and `color`) or `scene`, plus `duration_s` (10), `priority` (0, ±100) and `repeat` (1). `NotifyRequest::validate` checks them against the configured scenes and icons.
+- **Pinning** is in the scheduler. A pinned scene shows regardless of its condition, while the playlist's own clock keeps running. A pin survives config reloads by scene name, and is released if the scene disappears.
+
 ### 7.1 HTTP (axum)
 - `GET  /metrics`: Prometheus
 - `GET  /preview.png`: current frame (scaled ×N, optional pixel-grid look)

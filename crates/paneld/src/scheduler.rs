@@ -72,6 +72,9 @@ pub struct Scheduler {
     current: Option<(usize, Instant)>,
     /// Where the next search for an eligible entry starts when idle.
     cursor: usize,
+    /// Pinned entry and when it was pinned (M4). While set, `tick` shows it
+    /// regardless of its condition and the playlist state is left alone.
+    pinned: Option<(usize, Instant)>,
 }
 
 impl Scheduler {
@@ -80,6 +83,7 @@ impl Scheduler {
             entries,
             current: None,
             cursor: 0,
+            pinned: None,
         }
     }
 
@@ -140,7 +144,31 @@ impl Scheduler {
 
     /// Advance to `now` and return the scene to show, or `None` if no scene
     /// is eligible.
+    /// Pin entry `index` (shown from `now`, regardless of its condition), or
+    /// release the pin with `None`. While pinned, the playlist's own clock
+    /// keeps running untouched; on release `tick` carries on from it, so a
+    /// scene whose duration ran out during the pin moves on at the next tick.
+    /// Out-of-range indices are ignored.
+    pub fn pin(&mut self, index: Option<usize>, now: Instant) {
+        self.pinned = match index {
+            Some(i) if i < self.entries.len() => Some((i, now)),
+            Some(_) => self.pinned,
+            None => None,
+        };
+    }
+
+    /// The pinned entry, if any.
+    pub fn pinned(&self) -> Option<usize> {
+        self.pinned.map(|(i, _)| i)
+    }
+
     pub fn tick(&mut self, now: Instant, store: &StoreSnapshot) -> Option<Active> {
+        if let Some((index, since)) = self.pinned {
+            return Some(Active {
+                index,
+                elapsed: now.saturating_duration_since(since),
+            });
+        }
         let n = self.entries.len();
         if n == 0 {
             return None;
@@ -185,6 +213,35 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pin_overrides_conditions_and_release_returns_to_the_playlist() {
+        let empty = StoreSnapshot::default();
+        // Entry 1 is never eligible (its key is missing).
+        let mut s = Scheduler::new(vec![
+            Entry {
+                duration: Duration::from_secs(10),
+                condition: None,
+            },
+            Entry {
+                duration: Duration::from_secs(10),
+                condition: Some(Condition::parse("x:missing").unwrap()),
+            },
+        ]);
+        let t0 = Instant::now();
+        assert_eq!(s.tick(t0, &empty).map(|a| a.index), Some(0));
+        s.pin(Some(1), t0 + Duration::from_secs(2));
+        assert_eq!(s.pinned(), Some(1));
+        let a = s.tick(t0 + Duration::from_secs(5), &empty).unwrap();
+        assert_eq!((a.index, a.elapsed), (1, Duration::from_secs(3)));
+        // Out of range: ignored, pin kept.
+        s.pin(Some(9), t0);
+        assert_eq!(s.pinned(), Some(1));
+        s.pin(None, t0 + Duration::from_secs(6));
+        assert_eq!(s.pinned(), None);
+        let a = s.tick(t0 + Duration::from_secs(6), &empty).unwrap();
+        assert_eq!((a.index, a.elapsed), (0, Duration::from_secs(6)));
+    }
     use crate::store::{Store, Value};
 
     fn secs(s: u64) -> Duration {

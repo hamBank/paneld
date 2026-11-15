@@ -5,12 +5,14 @@
 //! renderer with the `clock` and `text` widgets, the render loop and the
 //! HTTP preview sink.
 
+pub mod api;
 pub mod bdf;
 pub mod canvas;
 pub mod color;
 pub mod colorlight_sink;
 pub mod condition;
 pub mod config;
+pub mod control;
 pub mod engine;
 pub mod extract;
 pub mod fonts;
