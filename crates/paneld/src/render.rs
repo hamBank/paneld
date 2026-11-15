@@ -24,3 +24,21 @@ pub fn render_scene(
     scene.render(ctx, store, &mut canvas);
     Ok(canvas)
 }
+
+/// The card-space framebuffer of the colorlight output at `output` (its
+/// index among `[[output]]`) for a rendered canvas: the canvas through the
+/// output map, with no gamma, white point or colour order (like the preview).
+pub fn card_frame(cfg: &Config, output: usize, canvas: &Canvas) -> anyhow::Result<Canvas> {
+    use crate::config::OutputConfig;
+    match cfg.outputs.get(output) {
+        Some(OutputConfig::Colorlight(cl)) => cl
+            .output_map(cfg.canvas.width, cfg.canvas.height)
+            .and_then(|m| m.map_canvas(canvas))
+            .map_err(anyhow::Error::msg),
+        Some(_) => anyhow::bail!("output[{output}] is not a colorlight output"),
+        None => anyhow::bail!(
+            "there is no output[{output}] ({} output(s) configured)",
+            cfg.outputs.len()
+        ),
+    }
+}

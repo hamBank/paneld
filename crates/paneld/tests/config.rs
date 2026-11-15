@@ -217,9 +217,9 @@ fn colorlight_requires_interface() {
 #[test]
 fn colorlight_rejects_unknown_keys_and_modes() {
     let e = err(&format!(
-        "{MINIMAL}[[output]]\ntype = \"colorlight\"\ninterface = \"eth1\"\nregion = 1\n"
+        "{MINIMAL}[[output]]\ntype = \"colorlight\"\ninterface = \"eth1\"\nregions = 1\n"
     ));
-    assert!(e.contains("unknown field `region`"), "{e}");
+    assert!(e.contains("unknown field `regions`"), "{e}");
     let e = err(&format!(
         "{MINIMAL}[[output]]\ntype = \"colorlight\"\ninterface = \"eth1\"\nbrightness_mode = \"auto\"\n"
     ));
@@ -1058,4 +1058,162 @@ fn notifications_config_defaults_parses_and_validates() {
     );
     let e = err(&format!("[notifications]\nbogus = 1\n{MINIMAL}"));
     assert!(e.contains("bogus"), "{e}");
+}
+
+const CL: &str = "[[output]]\ntype = \"colorlight\"\ninterface = \"eth1\"\n";
+
+fn cl_config(canvas: (u32, u32), output_body: &str) -> String {
+    format!(
+        "[canvas]\nwidth = {}\nheight = {}\n[[scene]]\nname = \"a\"\n{CL}{output_body}",
+        canvas.0, canvas.1
+    )
+}
+
+#[test]
+fn output_without_regions_maps_the_whole_canvas() {
+    let cfg = Config::parse(&cl_config((64, 32), "")).unwrap();
+    let c = colorlight(&cfg, 0);
+    assert!(c.regions.is_empty());
+    assert_eq!(c.card_size, None);
+    let m = c.output_map(64, 32).unwrap();
+    assert!(m.is_identity());
+    assert_eq!(m.card_size(), (64, 32));
+}
+
+#[test]
+fn regions_parse_with_defaults_and_all_fields() {
+    let cfg = Config::parse(&cl_config(
+        (172, 172),
+        "card_size = { w = 172, h = 172 }\n\
+         [[output.region]]\ncanvas = { x = 0, y = 0, w = 172, h = 86 }\n\
+         [[output.region]]\ncanvas = { x = 0, y = 86, w = 172, h = 86 }\n\
+         card_offset = { x = 0, y = 86 }\nrotate = 180\nflip = \"horizontal\"\n",
+    ))
+    .unwrap();
+    use paneld::output_map::{Flip, Rotation};
+    let c = colorlight(&cfg, 0);
+    assert_eq!(c.regions.len(), 2);
+    assert_eq!(c.card_size.map(|s| (s.w, s.h)), Some((172, 172)));
+    let (a, b) = (&c.regions[0], &c.regions[1]);
+    assert_eq!((a.card_offset.x, a.card_offset.y), (0, 0));
+    assert_eq!((a.rotate, a.flip), (Rotation::Deg0, Flip::None));
+    assert_eq!((b.card_offset.x, b.card_offset.y), (0, 86));
+    assert_eq!((b.rotate, b.flip), (Rotation::Deg180, Flip::Horizontal));
+    let m = c.output_map(172, 172).unwrap();
+    assert_eq!(m.card_size(), (172, 172));
+    // Flip horizontal then 180 degrees is a vertical flip: the region's
+    // top-left canvas pixel (0, 86) ends at the bottom-left of the card.
+    assert_eq!(m.source_at(0, 171), Some((0, 86)));
+}
+
+#[test]
+fn invalid_region_values_are_rejected_with_a_clear_message() {
+    let region = |extra: &str| {
+        err(&cl_config(
+            (8, 8),
+            &format!("[[output.region]]\ncanvas = {{ x = 0, y = 0, w = 4, h = 4 }}\n{extra}"),
+        ))
+    };
+    assert!(region("rotate = 45\n").contains("rotate must be 0, 90, 180 or 270"));
+    assert!(region("flip = \"diagonal\"\n").contains("diagonal"));
+    assert!(region("bogus = 1\n").contains("bogus"));
+    assert!(region("card_offset = { x = 1 }\n").contains("y"));
+    let e = err(&cl_config(
+        (8, 8),
+        "[[output.region]]\ncanvas = { x = 0, y = 0, w = 4 }\n",
+    ));
+    assert!(e.contains("h"), "{e}");
+}
+
+#[test]
+fn region_validation_errors_name_the_output_and_region() {
+    // Outside the canvas.
+    let e = err(&cl_config(
+        (8, 8),
+        "[[output.region]]\ncanvas = { x = 0, y = 0, w = 4, h = 4 }\n\
+         [[output.region]]\ncanvas = { x = 6, y = 6, w = 4, h = 4 }\ncard_offset = { x = 4, y = 4 }\n",
+    ));
+    assert!(
+        e.contains("output[0] (colorlight) region[1]: canvas rect")
+            && e.contains("outside the 8x8 canvas"),
+        "{e}"
+    );
+    // Overlap in card space.
+    let e = err(&cl_config(
+        (8, 8),
+        "[[output.region]]\ncanvas = { x = 0, y = 0, w = 4, h = 4 }\n\
+         [[output.region]]\ncanvas = { x = 4, y = 4, w = 4, h = 4 }\ncard_offset = { x = 2, y = 2 }\n",
+    ));
+    assert!(
+        e.contains("output[0] (colorlight) region[1]: overlaps region[0]"),
+        "{e}"
+    );
+    // Overlap in canvas space (a mirror) is fine.
+    Config::parse(&cl_config(
+        (8, 8),
+        "[[output.region]]\ncanvas = { x = 0, y = 0, w = 4, h = 4 }\n\
+         [[output.region]]\ncanvas = { x = 0, y = 0, w = 4, h = 4 }\ncard_offset = { x = 4, y = 0 }\nflip = \"horizontal\"\n",
+    ))
+    .unwrap();
+    // Rotation turns the footprint: 6x2 at 90 degrees needs 2x6.
+    let body = |size: &str| {
+        format!(
+            "card_size = {size}\n[[output.region]]\ncanvas = {{ x = 0, y = 0, w = 6, h = 2 }}\nrotate = 90\n"
+        )
+    };
+    Config::parse(&cl_config((6, 2), &body("{ w = 2, h = 6 }"))).unwrap();
+    let e = err(&cl_config((6, 2), &body("{ w = 6, h = 2 }")));
+    assert!(
+        e.contains("region[0]: footprint 2x6") && e.contains("does not fit in card_size 6x2"),
+        "{e}"
+    );
+    // card_size also bounds the implicit whole-canvas region.
+    let e = err(&cl_config((8, 8), "card_size = { w = 4, h = 4 }\n"));
+    assert!(
+        e.contains("output[0] (colorlight)") && e.contains("card_size 4x4"),
+        "{e}"
+    );
+    // Degenerate values.
+    let e = err(&cl_config((8, 8), "card_size = { w = 0, h = 4 }\n"));
+    assert!(e.contains("card_size w and h must be >= 1"), "{e}");
+    let e = err(&cl_config(
+        (8, 8),
+        "[[output.region]]\ncanvas = { x = 0, y = 0, w = 0, h = 4 }\n",
+    ));
+    assert!(e.contains("region[0]: canvas w and h must be >= 1"), "{e}");
+}
+
+#[test]
+fn the_commented_region_block_in_the_example_config_is_valid() {
+    // Uncomment the colorlight block of config/example.toml and load it, so
+    // the documented example cannot rot.
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/example.toml");
+    let text = std::fs::read_to_string(path).unwrap();
+    let mut toml = String::new();
+    let mut inside = false;
+    for line in text.lines() {
+        if line == "# [[output]]" {
+            inside = true;
+        }
+        if !inside {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix('#') else {
+            break;
+        };
+        // Prose lines are comments; key and table lines are TOML.
+        let rest = rest.trim_start();
+        if rest.starts_with('[') || rest.contains(" = ") {
+            let rest = rest.split(" #").next().unwrap().trim_end();
+            toml.push_str(rest);
+            toml.push('\n');
+        }
+    }
+    let cfg = Config::parse(&format!(
+        "[canvas]\nwidth = 172\nheight = 172\n[[scene]]\nname = \"a\"\n{toml}"
+    ))
+    .unwrap_or_else(|e| panic!("{e:#}\n{toml}"));
+    let c = colorlight(&cfg, 0);
+    assert_eq!(c.regions.len(), 2);
+    assert_eq!(c.output_map(172, 172).unwrap().card_size(), (172, 172));
 }
