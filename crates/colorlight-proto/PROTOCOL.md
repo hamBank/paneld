@@ -2,7 +2,7 @@
 
 Confirmed packet layouts, with sources. Only what is listed here may be encoded in `colorlight-proto`. Every entry needs at least two agreeing references and a byte-exact test. Where a byte rests on one reference, the entry says so and "Still uncertain" lists it.
 
-All sources were read as raw text (raw GitHub files, the blog's HTML with tags stripped), not from summaries. The haraldkubota/colorlight repo was not used: its README only links to the blog post, and the GitHub API was unavailable.
+All sources were read as raw text (raw GitHub files, the blog's HTML with tags stripped), not from summaries. The haraldkubota/colorlight repo was not used in the first pass because the GitHub API was unavailable. Its README (raw, `main`) was read later for the multi-receiver work: besides the link to the blog post it says cards must be daisy-chained, see "Multiple receivers".
 
 ## Sources
 
@@ -14,6 +14,7 @@ All sources were read as raw text (raw GitHub files, the blog's HTML with tags s
 | CLRS | asamonik/colorlight.rs `src/lib.rs`: https://github.com/asamonik/colorlight.rs | see repo |
 | DISS | FPP's Wireshark dissector, https://github.com/FalconChristmas/fpp/blob/master/docs/ColorLight_Wireshark.lua (read 2026-11-12). Part of FPP, so GPL-2.0: facts only. Its field labels are unverified, see "Disagreements". | GPL-2.0 |
 | GB | gbestwick's comment (2023-09-16) under the HK post | blog comment |
+| HKR | haraldkubota/colorlight `README.md` (raw, `main`, read 2026-11-15): https://github.com/haraldkubota/colorlight | see repo |
 
 ## Offset conventions
 
@@ -151,6 +152,65 @@ colorlight.rs differs from the others only in how it uses the fields: it hardcod
 
 So BGR is correct for HK's panel and an assumption in CLRS; RGB is FPP's default. DESIGN.md's "BGR" was wrong as a universal statement and is corrected. `colorlight-proto` treats pixel bytes as opaque: it never reorders them. The sink needs a per-output colour order setting, and the right value for our two 172x86 panels has to be found on hardware (open question in DESIGN.md section 15).
 
+## Multiple receivers (daisy chain on one port)
+
+Read from the raw sources on 2026-11-15: FPP `ColorLight-5a-75.{cpp,h}` (the header comment of the `.cpp`, `GetReceiverInfo`, `Init`, `PrepData`) and `docs/ColorLight_Wireshark.lua`; the HK post (text and comments) and the README of https://github.com/haraldkubota/colorlight (raw, `main`); PP `colorlight.c` and CLRS `lib.rs` (searched for anything on several receivers: nothing). **No source describes the multi-receiver case end to end.** What follows separates what a source says from what we infer. Nothing here changes the encoders; `colorlight-proto` decodes no new `0x08` field because none is confirmed.
+
+### How the cards are connected
+
+HK's repo README: "Connect the card's Ethernet port (either one) to a GBit NIC or a L2 switch. If you have multiple Colorlight cards, do not connect them to one switch: since they use hardcoded MAC addresses, this won't work. Instead daisy-chain them." So one NIC port feeds the first card's Ethernet port and the other ports daisy-chain on to the next card. All our frames use the same fixed destination MAC (`11:22:33:44:55:66`, see "Ethernet framing"), which is why a switch can't tell the cards apart.
+
+### 1. Coordinate space: one global space (inferred, not stated)
+
+- **No packet addresses a receiver.** The `0x55` row header (FPP header comment, `data[0..7]`) has row, pixel offset, pixel count and two constants, and no receiver field. The `0x01` and `0x0A` layouts have none either (FPP comment; HK; PP; CLRS). The only packets carrying a receiver number are `0x07` (`data[3]`, FPP; same byte as HK's "ack" `Data[2]`), `0x08` reply (`data[85]`), `0x11` ("Save Config??", `data[3]`) and the `0x02` layout write below.
+- **The `0x02` layout write describes one display with a per-receiver rectangle.** FPP's header comment (title: "Write receiver layout (dual 32x16 receivers, #0 @ 0,0, #1 @ 32,0") gives 20 bytes per receiver: its width, its height, "next receiver xOffset/yOffset" and "total display width/height". The example is 32x16 + 32x16 with next offset (32, 0) and total 64x16. The dissector reads the same fields at the same places and allows 64 records (`20 * 64` bytes). So a chain is configured as receivers placed at x/y positions inside one total display, and every record repeats the total size.
+- **FPP sends one frame in one space.** `PrepData` builds `m_rows = outputs * panelHeight` rows of `m_rowSize = longestChain * panelWidth * 3` bytes, numbered from 0, with pixel offsets from 0 within the row, and no step depends on a receiver. FPP's `ColorLightReceiver` struct has `xOffset`/`yOffset` but `GetReceiverInfo` never fills them (the log line that would print them is commented out) and nothing reads them. FPP's receiver list is used only to find the highest firmware major.
+- **Conclusion (inferred).** Row = row in the total display, pixel offset = column in the total display, and each receiver takes its own rectangle from the layout stored on the card (written by LEDVision or by `0x02`). This is the only reading consistent with a layout packet that holds a total size and no receiver field in the pixel packets. **Not confirmed on hardware, and no source states it.** What the global row/column of a receiver's rectangle corresponds to in the pixel stream (for example whether the card flips or offsets rows of a second receiver) is not documented.
+- gbestwick's comment under the HK post says of the controller numbers: "This is how multiple controllers are handled." That is about discovery (receiver number in `0x08` and the `0x07` request), not about pixel addressing.
+
+### 2. Display frames and brightness on a chain: no per-receiver field (inferred)
+
+- `0x01` and `0x0A` have no receiver field in any reference (all bytes accounted for in the sections above), and FPP sends one `0x01` (two on firmware >= 13) per frame regardless of receiver count. The natural reading is that one display frame latches every receiver on the port and that brightness is global, because a receiver can't be singled out. **No source says so, and no capture of a chain exists.** Whether the frame needs to reach receivers in any order, or whether the second receiver latches at the same instant, is unknown.
+- Mixed firmware: FPP takes the *highest* major on the interface and uses it for everyone (`m_highestFirmwareVersion`). It does not say what happens to an older receiver in a chain that receives two `0x01` frames. DESIGN.md 4.2 therefore treats it as unsupported, and `probe` and the sink warn about it.
+
+### 3. Discovery on a chain
+
+- A chain is walked by index: ask `0x07` with receiver number 0, then 1, ... (FPP `GetReceiverInfo`, `r < 32`, stops at the first index that doesn't answer; HK/gbestwick: the "ack" carries the previous controller's number plus one). Each reply carries its own number at offset 98, which `colorlight-net` uses to drop duplicates. Whether the number is the position in the chain or a value stored in the card's config (LEDVision) is **not stated**. We therefore can't tell whether a gap in the numbers is possible; `discover()` stops at the first silent index like FPP, so receivers after a silent one are not found.
+- **Per receiver the reply gives (confirmed, FPP + HK/DISS where listed in "0x08 Discovery response"):** model, firmware, width/height fields (offsets 34-37), packet counter, uptime, index. **No x/y offset is confirmed.** FPP's struct has fields for them and its comment lists "Cabinet X-Offset / Y-Offset" with the position written `Data[??]`: the authors didn't find them. HK's capture (single card) shows only zeros in the region where offsets would be.
+- **FPP's caveat explained? Partly, as a hypothesis from FPP's own table.** FPP lists the bytes at `data[19..34]` for four replies (a receiver 0 at 32x16 offset 0,0 and a receiver 1 in three placements). Reading the table's width/height bytes (`data[21..24]`):
+
+  | Annotation | width, height bytes | Total display (from annotation) | Cabinet offset |
+  |---|---|---|---|
+  | r0 | 32, 16 | (32x16 alone) | 0,0 |
+  | r1 (placement A) | 32, 32 | 32x32 | 0,16 |
+  | r1 (placement B) | 64, 32 | 64x32 | 32,16 |
+  | r1 (placement C) | 32, 32 (annotation says 64x16) | 64x16 | 32,0 |
+
+  In A and B, and in C if its bytes are the ones the annotation implies (0x40, 0x10: they are not, they repeat A's bytes, so C looks like a copy-paste slip), the pair equals **offset + cabinet size** (0+32, 16+16; 32+32, 16+16; 32+32, 0+16), which is the extent of the display up to and including that receiver. That explains FPP's remark that the values "don't match the cabinet width/height" once a card is offset. For a single card at 0,0 the extent equals the cabinet size, which is the only case HK's capture covers. **One source, one inconsistent example, no hardware check: a hypothesis only.** The two bytes at `data[19..20]` also differ between r0 (`0x0000`) and r1 (`0x0010`) in all four lines, including placement C where the y offset is 0, so they aren't the y offset; their meaning is unknown.
+- Consequence for the code: `colorlight_net::Layout::reported_extent` is the largest width and height any receiver reports, which equals the card space on that reading and also for a single card. It is a heuristic for an advisory warning (`check_layout`) and `probe`'s "card space the port expects". Differing sizes on a chain are reported as a note, not as an error.
+
+### 4. The `0x02` receiver-layout write: documented, never sent
+
+- What it is (FPP header comment, DISS): type `0x02`, `Data[0..2]` receiver number (the comment repeats "Receiver #" for every byte, so the exact meaning of those three bytes is unclear), then up to 64 records of 20 bytes from `Data[3]`: `Data[+4..5]` receiver width, `+6..7` height, `+10..11` next receiver x offset, `+12..13` next receiver y offset, `+14..15` total display width, `+16..17` total display height (all u16 BE; the other bytes are unexplained). The packet length isn't documented. FPP titles it "Write receiver layout"; who sends it (LEDVision, presumably) isn't stated.
+- **paneld never sends it.** By its name it reconfigures the card, a risky change to make from a daemon, and the references don't establish the surrounding sequence (`0x10`, `0x11` save, `0x18`, `0x1F`, `0x26`, `0x31`, `0x32`, `0x76`, "sent when sending config to receiver"). Receiver regions are set in LEDVision (DESIGN.md 4.2). `colorlight-proto` has no encoder or decoder for it, and one must not be added without hardware tests and a design change.
+
+### 5. Limits
+
+- **No source states a maximum row width or total pixel count per port.** FPP splits rows of any width into packets of at most 497 pixels (`CL_MAX_PIXL_PER_PACKET`), each with its own pixel offset, so a row wider than one packet is normal and wider than a single receiver's span is implied by a chain (not stated). The fields are u16: pixel offset and pixel count up to 65535 and rows up to 65535. `row_packets` rejects a row whose offset plus width would pass 65536.
+- Receiver count: FPP's discovery loop stops at 32 (`r < 32`); the `0x02` layout and the dissector allow 64 records. Both are implementation choices of FPP/LEDVision; `MAX_RECEIVERS` stays 32.
+- Bandwidth, not addressing, is the practical limit: all receivers share one Gigabit link and rows are sent for the whole display each frame. FPP warns when the link isn't 1000 Mbit (not a protocol limit).
+
+### Unconfirmed (multiple receivers)
+
+1. That `0x55` rows and columns are in a single global space for the whole port (inferred from `0x02` and from the absence of a receiver field; not stated anywhere).
+2. That one `0x01` latches every receiver and that `0x0A` brightness reaches all (no receiver field; no capture of a chain).
+3. Where a receiver's x/y offset is reported in `0x08`, or whether it is at all. Offsets are not decoded.
+4. What the width/height in `0x08` mean on a chain (cabinet size, extent, or total display). The extent reading is a hypothesis from one table that contradicts itself in one row.
+5. Whether receiver numbers are chain positions or configured values, and whether gaps occur.
+6. The `0x02` byte layout beyond FPP's comment (sequence, header bytes, length), the unexplained `data[19..20]` of the `0x08` reply, and all of `0x10` to `0x76`.
+7. Behaviour of mixed firmware on one chain.
+8. Everything above for 5A-75E cards and for firmware other than the ones HK and FPP describe.
+
 ## Frame order for the sink
 
 Guidance from FPP (`PrepData` and `SendData`), not enforced by this crate:
@@ -173,6 +233,8 @@ FPP skips the `0x01` if the rows didn't all go out, so the card keeps showing th
 | `0x0A` and `0x01` channel labels | DISS: B, G, R; PP, CLRS, HK captures: R, G, B | R, G, B (see above) |
 | Row packet constant | HK/CLRS comment `0x80`; all code and HK's capture `0x88` | `0x88` |
 | Pixel order | HK/CLRS BGR; FPP header RGB | not fixed; the caller's choice |
+| `0x08` width/height on a chain | HK: configured pixel size; FPP comment: "cabinet width/height" but "don't seem totally correct" when offset; FPP's table fits offset + cabinet size, and its row C bytes contradict their own annotation | decoded as raw width/height; `Layout::reported_extent` takes the maximum as a heuristic, see "Multiple receivers" |
+| Receiver count limit | FPP discovery 32; FPP/DISS `0x02` layout 64 records | `MAX_RECEIVERS` = 32 |
 
 ## Still uncertain
 
@@ -183,6 +245,7 @@ FPP skips the `0x01` if the rows didn't all go out, so the card keeps showing th
 - `0x08` offset 14 (`0x04` in the capture) and everything not listed above (e.g. bytes 0x6c-0x6e, `0f 04 08` in the capture) are undecoded.
 - The firmware >= 13 rule (double `0x01` and `0x0A`) is FPP-only and not checked on hardware.
 - Behaviour of firmware between 11 and 13, and on 5A-75E cards, is not documented in any source.
-- `0x02` (receiver layout), `0x10` to `0x76` (config writes) and `0x11` appear in FPP's header comment and the dissector but are not implemented; the daemon only sends pixels (the card is configured with LEDVision).
+- `0x02` (receiver layout), `0x10` to `0x76` (config writes) and `0x11` appear in FPP's header comment and the dissector but are not implemented; the daemon only sends pixels (the card is configured with LEDVision). **paneld never sends `0x02`**, see "Multiple receivers".
+- Everything about chains of several receivers: see "Unconfirmed (multiple receivers)" above.
 
 Why split the protocol out: it's testable without hardware or root, and reusable. `colorlight.rs` (crates.io `colorlight` 0.1.0) is a reference, not a dependency. Vendor ideas, own the code.

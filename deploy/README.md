@@ -70,7 +70,7 @@ Use a modest brightness while you work; `test-pattern` defaults to 64 of 255 and
 paneld probe --interface eth1
 ```
 
-Expect one line per receiver with firmware major.minor, the size the card reports, and whether it needs double sync. Exit status is non-zero if nothing answers: check the cable, the interface, that the card is powered, and the firmware. The reported size is only a sanity check (FPP warns it is not always accurate).
+Expect a table with one row per receiver (index, firmware major.minor, the size it reports, offset), then the card space the port expects and whether it needs double sync. Exit status is non-zero if nothing answers: check the cable, the interface, that the card is powered, and the firmware. The reported size is only a sanity check (FPP warns it is not always accurate).
 
 **b. Panel order and mirroring: `panel-ids`.**
 
@@ -251,5 +251,18 @@ For a dry run into a scratch directory, `DESTDIR=/tmp/root deploy/install.sh ./p
 | Panels swapped, mirrored, wrong order | Use the `panel-ids` pattern (section 4b), then LEDVision port order and direction. |
 | Wrong colours | `bars` pattern (section 4d) and `color_order`; brightness and gamma in 4e. |
 | Half the panel shifted or the middle line broken | `grid` pattern (section 4c), scan setting in LEDVision. |
+| More than one receiver on the port: `probe` lists fewer than you chained | `probe` stops at the first receiver that doesn't answer, so one that is off, mis-cabled or numbered out of order hides all that follow. See "Several cards on one port". |
+| `warning: receivers [...] run firmware >= 13 and receivers [...] older` | One sync count is sent for the whole port. Flash the chain to one firmware version. |
+
+### Several cards on one port
+
+Several 5A-75B cards can be daisy-chained on one NIC (the HK repo's README says to chain them, never to share a switch, because the cards use hardcoded MAC addresses). **Nothing about chains has been seen on hardware**: pixel addressing and latching on a chain are inferences from the protocol references (`crates/colorlight-proto/PROTOCOL.md`, "Multiple receivers"). paneld never configures the cards, so bring them up in this order:
+
+1. Cable the NIC to the first card and the first card's second Ethernet port to the next, and so on. Do not use a switch.
+2. In LEDVision, set each receiver's region (width, height and x/y position in the whole display) and save it to that card. paneld sends one coordinate space for the whole port and each card takes its own region from what LEDVision stored. Do this one card at a time if the chain misbehaves.
+3. Run `paneld probe --interface eth1`. Check that every card is listed with the index you expect (0 is the first), that the firmware is the same major version (>= 13 vs older is warned about), and that "card space the port expects" is the total display you configured. The reported sizes and the offset column are not fully understood (offsets print as `unknown`); a mismatch is a hint, not proof.
+4. Only then run `test-pattern` with the `panel-ids` and `grid` patterns at the total display size (section 4b and 4c) and look at where each card draws its region.
+
+If `probe` stops early, power-cycle the missing card and check its cabling and that its receiver number in LEDVision is the next one in line (whether the number follows the chain position or the stored configuration is not documented).
 
 Journal for one failed start: `journalctl -u paneld -b -e`. To see what the sandbox allows: `systemd-analyze security paneld.service`.

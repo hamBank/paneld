@@ -14,9 +14,11 @@ use std::io;
 use std::time::Duration;
 
 mod discovery;
+mod layout;
 pub mod mock;
 
 pub use discovery::{discover, MAX_RECEIVERS};
+pub use layout::{check_layout, Layout, Warning};
 
 #[cfg(target_os = "linux")]
 mod linux;
