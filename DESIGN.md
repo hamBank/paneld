@@ -360,6 +360,26 @@ Publish discovery configs so HA auto-creates one device with:
 
 Also accept raw notification JSON on `<prefix>/notify` (same schema as HTTP). Use `rumqttc`. Availability topic + LWT.
 
+**As built (`mqtt_ha.rs`, formats checked against HA's docs: `mqtt_ha/HA_DISCOVERY.md`):**
+- **Config:** top-level `[mqtt]` (`host`, `port` 1883, `username`, `password_env`, `discovery_prefix` `homeassistant`, `node_id` `paneld`, `base_topic` default `paneld/<node_id>`, a private namespace per node so two panels never collide). Absent: off. `password_env` is part of the startup env check. Read at startup only (like `[http]`). Plain TCP, same as the MQTT source (§6.2).
+- **One tokio task** next to the HTTP server, reusing `ClientSettings`/`Password` from `sources/mqtt.rs`; reconnects with 1 s to 30 s backoff, and on shutdown publishes `offline` itself (a clean DISCONNECT does not fire the will) before disconnecting.
+- **Topics** (`B` = base, `P` = prefix, `N` = node id; QoS 0, state and configs retained):
+
+| Entity | Config | State | Command |
+|---|---|---|---|
+| `light.paneld` (JSON schema, `brightness_scale` 255) | `P/light/N/light/config` | `B/light/state` `{"state","brightness","color_mode"}` | `B/light/set` |
+| `select.paneld_scene` | `P/select/N/scene/config` | `B/scene/state` (pin or `auto`) | `B/scene/set` |
+| `text.paneld_message` | `P/text/N/message/config` | none | `B/message/set` |
+| `binary_sensor.paneld_card` | `P/binary_sensor/N/card/config` | `B/card/state` `ON`/`OFF` | none |
+| `sensor.paneld_fps` | `P/sensor/N/fps/config` | `B/fps/state` | none |
+
+  Also `B/availability` (`online`/`offline`, retained; last will `offline`, QoS 1, retained), `B/notify` (raw `NotifyRequest` JSON, validated like HTTP; invalid ones are logged at warn and dropped) and `P/status` (HA's birth message).
+- **Commands:** light `{"state": "ON"|"OFF", "brightness": 0-255}` becomes `SetBrightness` then `SetPower`; select becomes `Pin(Some(scene))` or `Pin(None)` for `auto` (unknown names are ignored); text becomes a `Notify` with the default duration, priority and repeat; `B/notify` becomes `Notify`.
+- **Light brightness is the user brightness** (`Status.brightness`), not the effective level after auto-dim, so HA's slider shows what it set and does not move when the schedule dims the panel.
+- **Republish:** availability, all configs and all states on every ConnAck and when HA publishes `online` on the birth topic; the select config again whenever `Status.scenes` changes (reload); states only when they change, driven by `Control::subscribe()`. FPS is published when it moves by more than 1 or changes after 10 s. With no Colorlight output the card config is replaced by an empty retained payload, which removes a stale entity.
+- **Card:** sampled every 5 s from `SinkStats` (`main` passes them in): ON when every sink sent frames since the last sample and none had a send error.
+- A scene literally named `auto` is shadowed by the `auto` option.
+
 ### 7.3 Config hot reload
 Watch the config file. On change: parse + validate fully, build the new scenes and playlist (including image decoding and `Widget::prepare`) off the render thread, then hand the prepared set to the render loop, which swaps it in atomically with a non-blocking check at the top of a frame. Sources whose config changed get restarted, others keep running (see §6, "Hot reload", for how "changed" is decided, what happens to a removed source's keys and the environment-variable check). On error: log, keep the old config, count `config_reload_errors_total` (`ReloadStats::reload_errors`; exported as `paneld_config_reload_errors_total` in M5).
 

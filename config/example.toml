@@ -118,6 +118,20 @@ grid = true
 [http]
 bind = "127.0.0.1:8080"
 
+# Home Assistant over MQTT (DESIGN.md §7.2): paneld shows up as one device
+# with a light (on/off, brightness), a scene select, a message text box, a
+# card binary sensor (only with a colorlight output) and an fps sensor.
+# Off unless this section exists. Needs a restart to change. Separate from
+# `type = "mqtt"` sources, which only read topics. Plain TCP, no TLS.
+# [mqtt]
+# host = "homeassistant.local"
+# port = 1883                       # default
+# username = "paneld"
+# password_env = "PANELD_MQTT_PASSWORD"   # NAME of the env var holding the password (needs username)
+# discovery_prefix = "homeassistant"      # default; must match HA's MQTT discovery prefix
+# node_id = "paneld"                      # default; letters, digits, _ and -; unique per panel
+# base_topic = "paneld/paneld"            # default paneld/<node_id>
+
 # BDF fonts, usable as `font = "name"` in any text, clock or value widget.
 # `path` is relative to this file and is read when the config loads, so a
 # missing or malformed file is a config error. Built-in names (6x10, 10x20,

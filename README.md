@@ -65,6 +65,7 @@ See [`config/example.toml`](config/example.toml). Unknown keys are rejected, and
 | `[[output]]` | `type = "preview"`, `scale` (1–32, default 8), `grid` (default false) |
 | `[[output]]` | `type = "colorlight"`, `interface` (required), `gamma` (1.0–4.0, default 2.2), `brightness` (0–255, default 255), `white_point` (`#rrggbb`, default `#ffffff`), `brightness_mode` (`hardware` default, or `software`), `color_order` (`rgb` default, `rbg`, `grb`, `gbr`, `brg`, `bgr`: what the three wire bytes carry; the right value depends on the panel), `firmware_major` (optional override if discovery fails), `sync_gap_us` (0–20000, default 500). One output per interface. The whole canvas goes to card origin (0,0); multi-region maps come in M6. |
 | `[http]` | `bind` (default `127.0.0.1:8080`) |
+| `[mqtt]` | optional, Home Assistant entities: `host`, `port` (1883), `username`, `password_env`, `discovery_prefix` (`homeassistant`), `node_id` (`paneld`), `base_topic` (`paneld/<node_id>`); see Home Assistant (MQTT) below |
 | `[playlist]` | `default_duration_s` (> 0, at most 86400, default 10): how long a scene is shown when it has no `duration_s` |
 | `[[font]]` | `name`, `path`: a BDF font file (path relative to the config file) usable as `font = "name"`; see Fonts below. Repeatable. |
 | `[[scene]]` | `name`, `duration_s` (optional, same range), `condition` (optional, see below), `[[scene.zone]]` with `rect = { x, y, w, h }`, `widget`, optional `background = "#rrggbb"` |
@@ -202,12 +203,36 @@ Payloads:
 
 The password is read from the environment variable named by `password_env` (`paneld run` refuses to start if it is not set) and is never logged. Subscriptions use QoS 0. If the broker drops, the last values stay and show as stale; the source reconnects with backoff (1 s to 30 s) and subscribes again. Changing the source config takes a restart.
 
+### Home Assistant (MQTT)
+
+Add a top-level `[mqtt]` section and paneld shows up in Home Assistant as one device named `paneld`, through MQTT discovery (HA's MQTT integration must be set up and use the same broker; plain TCP, no TLS). Without `[mqtt]` nothing connects.
+
+```toml
+[mqtt]
+host = "homeassistant.local"
+username = "paneld"
+password_env = "PANELD_MQTT_PASSWORD"   # NAME of the env var; never the password itself
+# discovery_prefix = "homeassistant"    # default
+# node_id = "paneld"                    # default; unique per panel
+# base_topic = "paneld/paneld"          # default paneld/<node_id>
+```
+
+| Entity | Does |
+|---|---|
+| `light.paneld` | on/off and brightness 0-255 (the user brightness; auto-dim is applied on top and not shown) |
+| `select.paneld_scene` | pin a scene, or `auto` to follow the playlist; the options follow config reloads |
+| `text.paneld_message` | typing a message shows it as a notification (10 s, priority 0) |
+| `binary_sensor.paneld_card` | connectivity of the Colorlight card: on while frames are being sent without errors (only with a colorlight output) |
+| `sensor.paneld_fps` | rendered frames per second (updated on a change over 1 fps, or at most every 10 s) |
+
+Raw notifications go to `<base_topic>/notify` as the JSON of `POST /api/notify` (for example `{"text": "Door open", "icon": "bolt", "priority": 5}`); invalid ones are logged and ignored. `<base_topic>/availability` is `online` while paneld runs and `offline` otherwise (it is the MQTT last will). Configs, states and availability are retained and are published again after every reconnect and when HA announces it is online. The `[mqtt]` section is read at startup; changing it needs a restart.
+
 ### Live reload
 
 `paneld run` picks up edits to the config file without a restart. The file is polled once a second; a change is applied once the file has had the same new content on two consecutive polls (so a half-written save is not parsed, and touching the file without changing it does nothing), which means a reload takes about two seconds. On unix, `kill -HUP <pid>` reloads immediately. Editors that save in place or by rename-and-replace both work. The new config is fully parsed, validated and prepared (including decoding images) off the render thread, then swapped in between two frames; the playlist restarts at its first eligible scene and widget state (scroll position, GIF frame) starts over.
 
 - **Applied live:** scenes, zones, widgets, conditions, the playlist and `duration_s`, and `[sources]`. Only the sources whose config changed are restarted; the others keep running. Adding, removing or editing a `[sources.<name>]` table acts on that source alone, and so does a scene edit that makes it read different entities (for Home Assistant: a scene that starts showing a new `ha:` entity restarts the Home Assistant source). A removed source's values are cleared. A restarted source's values stay on screen until it writes again; keys it no longer produces are then removed. If a changed or added source needs an environment variable that is not set (a token), it is not started, the old one keeps running, and the reload counts an error; the scene changes still apply.
-- **Needs a restart:** `canvas.fps`, `[http]`, and every `[[output]]` (the preview and the Colorlight settings gamma, brightness, white point, colour order, sync gap and interface). If these differ from the running values, a warning names them and the scene and playlist changes are still applied.
+- **Needs a restart:** `canvas.fps`, `[http]`, and every `[[output]]` (the preview and the Colorlight settings gamma, brightness, white point, colour order, sync gap and interface). If these differ from the running values, a warning names them and the scene and playlist changes are still applied. `[mqtt]` is read at startup too.
 - **Rejected:** a changed `canvas` width or height, since scenes laid out for a new size would not fit the running canvas. Restart to resize.
 - **Errors never take the panel down.** A parse or validation error, an unreadable image, a canvas size change, or (with `run --scene X`) a config that no longer has scene `X` is logged with the full message, counted in `reload_errors`, and the old config keeps running. Fix the file and the next change is picked up. With `--scene X`, scene `X` stays on screen across reloads.
 - **Limitations:** image files referenced by the config are not watched; after replacing one, make any edit to the config or send SIGHUP.

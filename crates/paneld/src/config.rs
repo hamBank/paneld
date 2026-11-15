@@ -52,6 +52,11 @@ pub struct Config {
     /// source (`ha:`, `aircraft:`, `demo:`).
     #[serde(default)]
     pub sources: std::collections::BTreeMap<String, SourceConfig>,
+    /// MQTT connection for the Home Assistant entities (`mqtt_ha.rs`,
+    /// DESIGN.md §7.2). Absent: the feature is off. Separate from `type =
+    /// "mqtt"` sources, which only read topics.
+    #[serde(default)]
+    pub mqtt: Option<MqttConfig>,
     /// Directory relative media and font paths are resolved against: the config file's
     /// directory for [`Config::load`], the working directory for
     /// [`Config::parse`].
@@ -196,6 +201,37 @@ fn default_prom_interval_s() -> f64 {
 }
 fn default_http_timeout_s() -> f64 {
     10.0
+}
+
+/// Top-level `[mqtt]`: publish Home Assistant discovery entities and accept
+/// commands (`mqtt_ha.rs`). The password is never in the config:
+/// `password_env` names the environment variable that holds it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MqttConfig {
+    pub host: String,
+    #[serde(default = "default_mqtt_port")]
+    pub port: u16,
+    pub username: Option<String>,
+    /// Name of the environment variable holding the password (needs `username`).
+    pub password_env: Option<String>,
+    /// Home Assistant's discovery prefix.
+    #[serde(default = "default_discovery_prefix")]
+    pub discovery_prefix: String,
+    /// Identifies this paneld to HA (device identifier, unique ids, client
+    /// id). Letters, digits, `_` and `-`.
+    #[serde(default = "default_node_id")]
+    pub node_id: String,
+    /// Prefix of the state, command, availability and notify topics.
+    /// Default `paneld/<node_id>`.
+    pub base_topic: Option<String>,
+}
+
+fn default_discovery_prefix() -> String {
+    "homeassistant".into()
+}
+fn default_node_id() -> String {
+    "paneld".into()
 }
 
 /// `type = "mqtt"`. The password is never in the config: `password_env`
@@ -1129,6 +1165,10 @@ impl Config {
         }
         if !(1..=MAX_FPS).contains(&c.fps) {
             errs.push(format!("canvas.fps: must be 1..={MAX_FPS} (got {})", c.fps));
+        }
+
+        if let Some(m) = &self.mqtt {
+            crate::mqtt_ha::validate(m, "[mqtt]", &mut errs);
         }
 
         let mut previews = 0;
