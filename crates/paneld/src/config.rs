@@ -48,6 +48,9 @@ pub struct Config {
     /// Sun- and lux-driven auto-dim (DESIGN.md §5.2).
     #[serde(default)]
     pub auto_dim: Option<crate::autodim::AutoDimConfig>,
+    /// Look of inline notifications (DESIGN.md §5.5).
+    #[serde(default)]
+    pub notifications: NotificationsConfig,
     /// BDF fonts, usable by name from any text, clock or value widget.
     #[serde(default, rename = "font")]
     pub fonts: Vec<FontConfig>,
@@ -488,6 +491,42 @@ impl PlaylistConfig {
     pub fn default_duration(&self) -> Duration {
         seconds(self.default_duration_s)
     }
+}
+
+/// How inline (text/icon) notifications look. Scene notifications use the
+/// scene's own zones and ignore this.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NotificationsConfig {
+    /// Font for the text: a built-in or `[[font]]` name. Unset = pick the
+    /// largest built-in font that fits.
+    #[serde(default)]
+    pub font: Option<String>,
+    /// Integer scale 1..=8. Unset = the largest scale at which the text fits
+    /// the canvas width (scale 1 and scrolling if none does).
+    #[serde(default)]
+    pub font_scale: Option<u32>,
+    /// Background colour. Default black.
+    #[serde(default = "default_notification_background")]
+    pub background: Color,
+    /// Resolved `font`, filled in by [`Config::load_fonts`].
+    #[serde(skip)]
+    pub face: Option<FontFace>,
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        NotificationsConfig {
+            font: None,
+            font_scale: None,
+            background: default_notification_background(),
+            face: None,
+        }
+    }
+}
+
+fn default_notification_background() -> Color {
+    Color::BLACK
 }
 
 fn default_scene_duration_s() -> f64 {
@@ -1114,6 +1153,7 @@ impl Config {
                 .map(|b| FontFace::Bdf(Arc::clone(b)))
                 .or_else(|| FontFace::builtin(name))
         };
+        self.notifications.face = self.notifications.font.as_deref().and_then(resolve);
         for s in &mut self.scenes {
             for z in &mut s.zones {
                 match &mut z.widget {
@@ -1295,6 +1335,23 @@ impl Config {
             }
             if f.path.as_os_str().is_empty() {
                 errs.push(format!("font {:?}: path must not be empty", f.name));
+            }
+        }
+
+        if let Some(name) = &self.notifications.font {
+            if fonts::lookup(name).is_none() && !font_names.contains(&name.as_str()) {
+                errs.push(format!(
+                    "notifications.font: unknown font {name:?} (known: {})",
+                    fonts::known_names(&font_names)
+                ));
+            }
+        }
+        if let Some(s) = self.notifications.font_scale {
+            if !(1..=fonts::MAX_FONT_SCALE).contains(&s) {
+                errs.push(format!(
+                    "notifications.font_scale: must be 1..={} (got {s})",
+                    fonts::MAX_FONT_SCALE
+                ));
             }
         }
 

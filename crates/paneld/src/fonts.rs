@@ -113,6 +113,10 @@ impl Font {
         }
     }
 
+    pub fn face(&self) -> &FontFace {
+        &self.face
+    }
+
     pub fn scale(&self) -> u32 {
         self.scale
     }

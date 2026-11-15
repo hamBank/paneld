@@ -190,6 +190,14 @@ Applied per sink (so the preview can show "true" colours while the panel gets co
 - **Playlist**: ordered scenes with durations. Conditional scenes are skipped when their condition is false.
 - **Notifications**: priority queue. Each notification has priority, duration, optional repeat count, and either a scene ref or inline content (text/icon/colour). Higher priority interrupts the current one, then the playlist resumes **where it left off**.
 - As built in M2 (`scheduler.rs`, `condition.rs`): the scheduler is pure state driven by `tick(now: Instant, &StoreSnapshot)`, so tests inject time. It makes at most one switch per tick (a stalled render loop doesn't fast-forward the playlist), leaves a scene at once if its condition turns false, and returns `None` (black frame, logged once per transition) when nothing is eligible. Conditions are `key op literal`, bare `key` (truthy), `!`, `&&`, `||` and parentheses; a missing key or type mismatch makes a comparison false. `[playlist] default_duration_s` (default 10) is an addition to the §8 schema. `paneld run --scene X` plays a playlist of one.
+- **Notifications, as built (M4, `scheduler.rs` + `notifications.rs`).** The queue is part of the scheduler and uses the same injected clock:
+  - *Order:* highest priority first, FIFO among equals. A *strictly* higher priority interrupts the one showing; the interrupted one returns to the queue keeping its arrival order, its repeats and the **remaining time of the current repeat** (nothing is lost, and a scene notification's `scene_elapsed` continues).
+  - *Repeat* means "shown N times" **back-to-back** (`A` x3, then a later equal-priority `B`: `A A A B`), not interleaved with the playlist.
+  - *Playlist:* frozen while any notification shows; when the queue empties it resumes where it left off, same scene, remaining duration preserved. A **pinned scene is interrupted too** (notifications are alerts) and is shown again afterwards.
+  - `ClearNotifications` empties the queue and ends the current one. The queue holds at most 50; on overflow the lowest priority (newest among equals) waiting notification is dropped with a warning, never the one showing.
+  - A config reload keeps the queue; scene notifications whose scene disappeared are dropped.
+  - *Rendering:* a scene notification renders that scene with `scene_elapsed` from 0. Inline content is a one-off `Scene` (`inline.rs`) of ordinary text widgets plus a scaled icon: icon and text centred on a `background` (default black) in the notification's colour, in the largest font that fits the canvas width and height. Too wide even for the smallest font: the smallest font scrolls at 40 px/s beside a fixed icon. `[notifications]` in config (all optional): `font` (built-in or `[[font]]`; unset = auto over built-in fonts of 13 px height or more), `font_scale` (1..=8; unset = auto-fit), `background`.
+  - `Status.notifications` lists the showing one first, then the waiting ones in order; `Status.scene` is the notification's scene name, or `None` for inline content.
 - Manual override: pin a scene until released (via MQTT select / HTTP).
 - Transitions: none / cut first; slide/fade later.
 
@@ -344,7 +352,7 @@ A local source can poll every 1 s, since there is no external limit. Internally 
   - `level = brightness × dim / 255`, and each output's configured `brightness` is its calibrated maximum, scaled by `level / 255`;
   - off means black, and hardware brightness 0 where the sink supports it.
 - **Notification requests** have the same JSON shape on HTTP and MQTT: `text` (with optional `icon` and `color`) or `scene`, plus `duration_s` (10), `priority` (0, ±100) and `repeat` (1). `NotifyRequest::validate` checks them against the configured scenes and icons.
-- **Pinning** is in the scheduler. A pinned scene shows regardless of its condition, while the playlist's own clock keeps running. A pin survives config reloads by scene name, and is released if the scene disappears.
+- **Pinning** is in the scheduler. A pinned scene shows regardless of its condition, while the playlist's own clock keeps running; notifications still interrupt it (§5.5). A pin survives config reloads by scene name, and is released if the scene disappears.
 
 ### 7.1 HTTP (axum)
 - `GET  /metrics`: Prometheus (M5)

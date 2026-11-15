@@ -23,23 +23,54 @@
 //!   never catches up on missed time and never loops. A `now` earlier than
 //!   the scene start counts as zero elapsed.
 //!
-//! # Where M4 plugs in
-//! Both features are extra inputs checked at the top of `tick`, before the
-//! playlist logic, and neither needs the playlist code to change:
-//! - **Pinning**: a `pinned: Option<usize>` field; while set, `tick` returns
-//!   that scene (still tracking elapsed) and leaves `current`/`since` alone.
-//! - **Notifications**: a priority queue of `(priority, duration, scene)`.
-//!   While one is active, `tick` returns its scene, with [`Active`] gaining a
-//!   field saying it is an overlay. The playlist cursor is frozen by
-//!   recording how much of the current scene's duration was used; when the
-//!   queue empties, `since` is set to `now - used` so the playlist resumes
-//!   where it left off. [`Active`] is a struct so adding fields is
-//!   non-breaking for the engine.
+//! # Pinning (M4)
+//! While a scene is pinned, `tick` returns it (still tracking elapsed time)
+//! regardless of its condition, and leaves the playlist's own state alone.
+//!
+//! # Notifications (M4)
+//! A notification is an alert: a priority, a duration per showing, a repeat
+//! count and content (a configured scene, or inline text/icon). The queue
+//! lives in [`crate::notifications`]; `tick` consults it before the pin and
+//! the playlist. The rules:
+//! - **Order:** the highest priority shows first; equal priorities are FIFO
+//!   by arrival.
+//! - **Interrupt:** a *strictly* higher priority interrupts the one showing
+//!   (equal priority never does). The interrupted notification goes back to
+//!   the queue keeping its arrival order, its remaining repeats and the
+//!   **remaining time of the current repeat**, so it later continues where
+//!   it stopped (a scene notification's `scene_elapsed` continues too)
+//!   rather than being lost or restarted: every alert gets its full time.
+//! - **Repeat:** `repeat` is how many times it is shown, **back-to-back**: a
+//!   finished repeat re-enters the queue with its original arrival order, so
+//!   it follows straight on unless something of higher priority is waiting
+//!   (`A` with repeat 3 and a later equal-priority `B` shows `A A A B`).
+//!   Interleaving with the playlist was rejected: a repeat is meant to get
+//!   attention, and the playlist's frozen clock would make it confusing.
+//! - **Frozen playlist:** while any notification shows, the playlist clock
+//!   stops. When the queue empties the playlist resumes where it left off:
+//!   the same scene with the same remaining duration (its `since` is moved
+//!   forward by the time away). Conditions are re-checked as usual after
+//!   the resume.
+//! - **Pin:** a pinned scene is interrupted by notifications too (they are
+//!   alerts and must not be hidden by a pin); once the queue empties the
+//!   pin is shown again, its elapsed time continuing.
+//! - **Clear:** [`Scheduler::clear_notifications`] empties the queue and
+//!   ends the one showing.
+//! - **Cap:** at most [`MAX_QUEUE`](crate::notifications::MAX_QUEUE)
+//!   notifications; on overflow the lowest priority (newest among equals)
+//!   waiting one is dropped, with a warning.
+//! - **Reload:** the engine moves the queue to the new scheduler
+//!   ([`Scheduler::take_queue`] / [`Scheduler::adopt_queue`]); scene
+//!   notifications whose scene disappeared are dropped.
+//! - Like the playlist, a tick makes at most one change of what shows.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::condition::Condition;
 use crate::config::Config;
+use crate::control::{Notification, QueuedNotification};
+use crate::notifications::{Content, InlineNotice, NotificationQueue};
 use crate::store::StoreSnapshot;
 
 /// One playlist slot. Indices into the playlist are indices into the
@@ -56,13 +87,37 @@ impl Entry {
     }
 }
 
+/// What to render.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    /// A scene, by index in the playlist (the scene list the engine owns).
+    Scene(usize),
+    /// Inline notification content, drawn full-screen. `key` identifies the
+    /// showing (new for every repeat) so the caller can cache what it built.
+    Inline {
+        key: (u64, u32),
+        notice: Arc<InlineNotice>,
+    },
+}
+
 /// What to show this frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Active {
-    /// Index of the scene in the playlist.
-    pub index: usize,
-    /// Time since this scene became active.
+    pub target: Target,
+    /// Time since this scene (or notification repeat) became active.
     pub elapsed: Duration,
+    /// Whether this is a notification rather than the playlist or the pin.
+    pub notification: bool,
+}
+
+impl Active {
+    /// The scene index, for scene targets.
+    pub fn index(&self) -> Option<usize> {
+        match self.target {
+            Target::Scene(i) => Some(i),
+            Target::Inline { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -75,6 +130,11 @@ pub struct Scheduler {
     /// Pinned entry and when it was pinned (M4). While set, `tick` shows it
     /// regardless of its condition and the playlist state is left alone.
     pinned: Option<(usize, Instant)>,
+    /// Scene names, parallel to `entries`; scene notifications refer to them.
+    names: Vec<String>,
+    queue: NotificationQueue,
+    /// When the playlist clock was frozen by notifications, if it is.
+    frozen_at: Option<Instant>,
 }
 
 impl Scheduler {
@@ -84,7 +144,16 @@ impl Scheduler {
             current: None,
             cursor: 0,
             pinned: None,
+            names: Vec::new(),
+            queue: NotificationQueue::default(),
+            frozen_at: None,
         }
+    }
+
+    /// Name the entries (same order), so scene notifications can find them.
+    pub fn with_names(mut self, names: Vec<String>) -> Self {
+        self.names = names;
+        self
     }
 
     /// Build the playlist for the scenes at `indices` of `cfg.scenes`, in
@@ -113,7 +182,12 @@ impl Scheduler {
                 })
             })
             .collect::<anyhow::Result<_>>()?;
-        Ok(Scheduler::new(entries))
+        Ok(Scheduler::new(entries).with_names(
+            indices
+                .iter()
+                .map(|&i| cfg.scenes[i].name.clone())
+                .collect(),
+        ))
     }
 
     /// Drop every condition, so all entries are always eligible. Used when
@@ -162,11 +236,77 @@ impl Scheduler {
         self.pinned.map(|(i, _)| i)
     }
 
+    /// Queue a notification (see the module docs for the rules). It starts
+    /// showing at the next `tick`.
+    pub fn notify(&mut self, n: Notification) {
+        self.queue.push(n);
+    }
+
+    /// Empty the queue and end the notification showing.
+    pub fn clear_notifications(&mut self) {
+        self.queue.clear();
+    }
+
+    /// The showing notification first, then the waiting ones in order.
+    pub fn notification_status(&self) -> Vec<QueuedNotification> {
+        self.queue.status()
+    }
+
+    /// Hand the queue over (to the scheduler built by a config reload).
+    pub fn take_queue(&mut self) -> NotificationQueue {
+        std::mem::take(&mut self.queue)
+    }
+
+    /// Adopt a queue from the previous scheduler, dropping scene
+    /// notifications whose scene no longer exists.
+    pub fn adopt_queue(&mut self, mut queue: NotificationQueue) {
+        queue.retain_scenes(&self.names);
+        self.queue = queue;
+    }
+
     pub fn tick(&mut self, now: Instant, store: &StoreSnapshot) -> Option<Active> {
+        self.queue.advance(now);
+        // Skip a scene notification whose scene is unknown (cannot normally
+        // happen: they are validated and filtered on reload).
+        while let Some(cur) = self.queue.current(now) {
+            let target = match &cur.content {
+                Content::Scene(name) => match self.names.iter().position(|n| n == name) {
+                    Some(i) => Target::Scene(i),
+                    None => {
+                        tracing::warn!(scene = %name, "dropping notification for unknown scene");
+                        self.queue.retain_scenes(&self.names);
+                        self.queue.advance(now);
+                        continue;
+                    }
+                },
+                Content::Inline(notice) => Target::Inline {
+                    key: cur.key,
+                    notice: Arc::clone(notice),
+                },
+            };
+            self.frozen_at.get_or_insert(now);
+            return Some(Active {
+                target,
+                elapsed: cur.elapsed,
+                notification: true,
+            });
+        }
+        if let Some(t) = self.frozen_at.take() {
+            // Resume where the playlist (and pin) left off.
+            let away = now.saturating_duration_since(t);
+            if let Some((_, since)) = &mut self.current {
+                *since += away;
+            }
+            if let Some((_, since)) = &mut self.pinned {
+                // A pin set while frozen starts counting now.
+                *since = if *since <= t { *since + away } else { now };
+            }
+        }
         if let Some((index, since)) = self.pinned {
             return Some(Active {
-                index,
+                target: Target::Scene(index),
                 elapsed: now.saturating_duration_since(since),
+                notification: false,
             });
         }
         let n = self.entries.len();
@@ -204,8 +344,9 @@ impl Scheduler {
         let (index, since) = self.current?;
         self.cursor = (index + 1) % n;
         Some(Active {
-            index,
+            target: Target::Scene(index),
             elapsed: now.saturating_duration_since(since),
+            notification: false,
         })
     }
 }
@@ -229,18 +370,18 @@ mod tests {
             },
         ]);
         let t0 = Instant::now();
-        assert_eq!(s.tick(t0, &empty).map(|a| a.index), Some(0));
+        assert_eq!(s.tick(t0, &empty).and_then(|a| a.index()), Some(0));
         s.pin(Some(1), t0 + Duration::from_secs(2));
         assert_eq!(s.pinned(), Some(1));
         let a = s.tick(t0 + Duration::from_secs(5), &empty).unwrap();
-        assert_eq!((a.index, a.elapsed), (1, Duration::from_secs(3)));
+        assert_eq!((a.index().unwrap(), a.elapsed), (1, Duration::from_secs(3)));
         // Out of range: ignored, pin kept.
         s.pin(Some(9), t0);
         assert_eq!(s.pinned(), Some(1));
         s.pin(None, t0 + Duration::from_secs(6));
         assert_eq!(s.pinned(), None);
         let a = s.tick(t0 + Duration::from_secs(6), &empty).unwrap();
-        assert_eq!((a.index, a.elapsed), (0, Duration::from_secs(6)));
+        assert_eq!((a.index().unwrap(), a.elapsed), (0, Duration::from_secs(6)));
     }
     use crate::store::{Store, Value};
 
@@ -272,7 +413,7 @@ mod tests {
     }
 
     fn idx(a: Option<Active>) -> Option<usize> {
-        a.map(|a| a.index)
+        a.and_then(|a| a.index())
     }
 
     #[test]
@@ -295,7 +436,7 @@ mod tests {
             (70, 0, 0),
         ] {
             let a = s.tick(t0 + secs(t), &snap).unwrap();
-            assert_eq!((a.index, a.elapsed), (want, secs(el)), "t={t}");
+            assert_eq!((a.index().unwrap(), a.elapsed), (want, secs(el)), "t={t}");
         }
     }
 
@@ -338,7 +479,7 @@ mod tests {
 
         w.set("a:on", Value::Bool(false));
         let a = s.tick(t0 + secs(102), &store.snapshot()).unwrap();
-        assert_eq!((a.index, a.elapsed), (2, Duration::ZERO));
+        assert_eq!((a.index().unwrap(), a.elapsed), (2, Duration::ZERO));
 
         // Flipping back doesn't interrupt scene 2; it joins the rotation.
         w.set("a:on", Value::Bool(true));
@@ -358,7 +499,7 @@ mod tests {
 
         w.set("a:y", Value::Bool(true));
         let a = s.tick(t0 + secs(60), &store.snapshot()).unwrap();
-        assert_eq!((a.index, a.elapsed), (1, Duration::ZERO));
+        assert_eq!((a.index().unwrap(), a.elapsed), (1, Duration::ZERO));
         assert_eq!(idx(s.tick(t0 + secs(65), &store.snapshot())), Some(1));
 
         // Current goes ineligible: None; then the other comes back first.
@@ -366,7 +507,7 @@ mod tests {
         assert_eq!(s.tick(t0 + secs(66), &store.snapshot()), None);
         w.set("a:x", Value::Bool(true));
         let a = s.tick(t0 + secs(67), &store.snapshot()).unwrap();
-        assert_eq!((a.index, a.elapsed), (0, Duration::ZERO));
+        assert_eq!((a.index().unwrap(), a.elapsed), (0, Duration::ZERO));
     }
 
     #[test]
@@ -376,7 +517,7 @@ mod tests {
         let mut s = Scheduler::new(vec![entry(5, None)]);
         for t in [0, 4, 5, 6, 11, 1000] {
             let a = s.tick(t0 + secs(t), &snap).unwrap();
-            assert_eq!((a.index, a.elapsed), (0, secs(t)), "t={t}");
+            assert_eq!((a.index().unwrap(), a.elapsed), (0, secs(t)), "t={t}");
         }
     }
 
@@ -391,7 +532,7 @@ mod tests {
         ]);
         for t in [0, 5, 10, 17] {
             let a = s.tick(t0 + secs(t), &snap).unwrap();
-            assert_eq!((a.index, a.elapsed), (1, secs(t)));
+            assert_eq!((a.index().unwrap(), a.elapsed), (1, secs(t)));
         }
     }
 
@@ -404,11 +545,14 @@ mod tests {
         // A stall of a full day: one step forward, restarting at the jump time.
         let day = secs(86_400);
         let a = s.tick(t0 + day, &snap).unwrap();
-        assert_eq!((a.index, a.elapsed), (1, Duration::ZERO));
+        assert_eq!((a.index().unwrap(), a.elapsed), (1, Duration::ZERO));
         let a = s
             .tick(t0 + day + Duration::from_millis(500), &snap)
             .unwrap();
-        assert_eq!((a.index, a.elapsed), (1, Duration::from_millis(500)));
+        assert_eq!(
+            (a.index().unwrap(), a.elapsed),
+            (1, Duration::from_millis(500))
+        );
         assert_eq!(idx(s.tick(t0 + day + secs(1), &snap)), Some(2));
     }
 
@@ -419,7 +563,7 @@ mod tests {
         let mut s = Scheduler::new(vec![entry(10, None), entry(10, None)]);
         s.tick(t0, &snap).unwrap();
         let a = s.tick(t0 - secs(50), &snap).unwrap();
-        assert_eq!((a.index, a.elapsed), (0, Duration::ZERO));
+        assert_eq!((a.index().unwrap(), a.elapsed), (0, Duration::ZERO));
     }
 
     #[test]
@@ -428,5 +572,235 @@ mod tests {
         let mut s = Scheduler::new(vec![]);
         assert_eq!(s.tick(Instant::now(), &snap), None);
         assert!(s.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod notification_tests {
+    use super::*;
+    use crate::color::Color;
+    use crate::control::NotificationContent;
+
+    fn secs(s: u64) -> Duration {
+        Duration::from_secs(s)
+    }
+
+    fn inline(text: &str, priority: i32, dur: u64, repeat: u32) -> Notification {
+        Notification {
+            content: NotificationContent::Inline {
+                text: text.into(),
+                icon: None,
+                color: Color::WHITE,
+            },
+            duration: secs(dur),
+            priority,
+            repeat,
+        }
+    }
+
+    fn scene_n(name: &str, priority: i32, dur: u64) -> Notification {
+        Notification {
+            content: NotificationContent::Scene(name.into()),
+            duration: secs(dur),
+            priority,
+            repeat: 1,
+        }
+    }
+
+    fn playlist(durations: &[u64]) -> Scheduler {
+        let names = ["a", "b", "c"];
+        Scheduler::new(
+            durations
+                .iter()
+                .map(|d| Entry {
+                    duration: secs(*d),
+                    condition: None,
+                })
+                .collect(),
+        )
+        .with_names(
+            names[..durations.len()]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        )
+    }
+
+    /// What shows at `t0 + t`: the inline text, or `#<index>` for a scene,
+    /// plus the elapsed seconds.
+    fn at(s: &mut Scheduler, t0: Instant, t: u64) -> (String, u64) {
+        let snap = StoreSnapshot::default();
+        let a = s.tick(t0 + secs(t), &snap).expect("something shows");
+        let what = match &a.target {
+            Target::Scene(i) => format!("#{i}"),
+            Target::Inline { notice, .. } => notice.text.clone(),
+        };
+        (what, a.elapsed.as_secs())
+    }
+
+    fn shown(s: &mut Scheduler, t0: Instant, t: u64) -> String {
+        at(s, t0, t).0
+    }
+
+    #[test]
+    fn highest_priority_first_then_fifo() {
+        let t0 = Instant::now();
+        let mut s = playlist(&[100]);
+        s.notify(inline("a", 1, 2, 1));
+        s.notify(inline("b", 5, 2, 1));
+        s.notify(inline("c", 5, 2, 1));
+        s.notify(inline("d", 1, 2, 1));
+        let order: Vec<_> = (0..8).step_by(2).map(|t| shown(&mut s, t0, t)).collect();
+        assert_eq!(order, ["b", "c", "a", "d"]);
+        assert_eq!(shown(&mut s, t0, 8), "#0");
+        assert!(s.notification_status().is_empty());
+    }
+
+    #[test]
+    fn higher_priority_interrupts_and_the_interrupted_one_resumes_with_remaining_time() {
+        let t0 = Instant::now();
+        let mut s = playlist(&[100]);
+        s.notify(inline("low", 1, 10, 1));
+        assert_eq!(at(&mut s, t0, 0), ("low".into(), 0));
+        // Equal priority never interrupts.
+        s.notify(inline("same", 1, 5, 1));
+        assert_eq!(at(&mut s, t0, 3), ("low".into(), 3));
+        s.notify(inline("high", 9, 4, 1));
+        assert_eq!(at(&mut s, t0, 3), ("high".into(), 0));
+        let st = s.notification_status();
+        let summaries: Vec<_> = st.iter().map(|q| (q.summary.as_str(), q.showing)).collect();
+        assert_eq!(summaries, [("high", true), ("low", false), ("same", false)]);
+        // `low` continues with 7 s left (3 s used), ahead of the later `same`.
+        assert_eq!(at(&mut s, t0, 7), ("low".into(), 3));
+        assert_eq!(at(&mut s, t0, 13), ("low".into(), 9));
+        assert_eq!(at(&mut s, t0, 14), ("same".into(), 0));
+        assert_eq!(shown(&mut s, t0, 19), "#0");
+    }
+
+    #[test]
+    fn repeats_run_back_to_back() {
+        let t0 = Instant::now();
+        let mut s = playlist(&[100]);
+        s.notify(inline("a", 0, 2, 3));
+        s.notify(inline("b", 0, 2, 1));
+        let shows: Vec<_> = (0..8).step_by(2).map(|t| shown(&mut s, t0, t)).collect();
+        assert_eq!(shows, ["a", "a", "a", "b"]);
+
+        let mut s = playlist(&[100]);
+        s.notify(inline("a", 0, 2, 3));
+        at(&mut s, t0, 0);
+        assert_eq!(s.notification_status()[0].repeats_left, 3);
+
+        // Each repeat starts its own clock.
+        let mut s = playlist(&[100]);
+        s.notify(inline("a", 0, 2, 2));
+        assert_eq!(at(&mut s, t0, 1), ("a".into(), 0));
+        assert_eq!(at(&mut s, t0, 3), ("a".into(), 0));
+        assert_eq!(at(&mut s, t0, 4), ("a".into(), 1));
+        assert_eq!(shown(&mut s, t0, 5), "#0");
+    }
+
+    #[test]
+    fn clear_ends_the_showing_one_and_empties_the_queue() {
+        let t0 = Instant::now();
+        let mut s = playlist(&[100]);
+        s.notify(inline("a", 0, 50, 1));
+        s.notify(inline("b", 0, 50, 1));
+        assert_eq!(shown(&mut s, t0, 0), "a");
+        s.clear_notifications();
+        assert_eq!(shown(&mut s, t0, 1), "#0");
+        assert!(s.notification_status().is_empty());
+    }
+
+    #[test]
+    fn playlist_resumes_where_it_left_off_with_remaining_time() {
+        let t0 = Instant::now();
+        let mut s = playlist(&[10, 10]);
+        assert_eq!(at(&mut s, t0, 0), ("#0".into(), 0));
+        assert_eq!(at(&mut s, t0, 4), ("#0".into(), 4));
+        s.notify(inline("n", 0, 20, 1));
+        assert_eq!(shown(&mut s, t0, 5), "n");
+        assert_eq!(shown(&mut s, t0, 24), "n");
+        // 5 s of scene 0 were used; the 20 s away don't count.
+        assert_eq!(at(&mut s, t0, 25), ("#0".into(), 5));
+        assert_eq!(at(&mut s, t0, 29), ("#0".into(), 9));
+        assert_eq!(at(&mut s, t0, 30), ("#1".into(), 0));
+    }
+
+    #[test]
+    fn scene_notifications_show_that_scene_from_zero() {
+        let t0 = Instant::now();
+        let mut s = playlist(&[10, 10, 10]);
+        assert_eq!(at(&mut s, t0, 0), ("#0".into(), 0));
+        s.notify(scene_n("c", 0, 5));
+        assert_eq!(at(&mut s, t0, 2), ("#2".into(), 0));
+        assert_eq!(at(&mut s, t0, 4), ("#2".into(), 2));
+        assert_eq!(s.notification_status()[0].summary, "scene:c");
+        assert_eq!(at(&mut s, t0, 7), ("#0".into(), 2));
+    }
+
+    #[test]
+    fn a_pin_is_interrupted_and_shown_again_afterwards() {
+        let t0 = Instant::now();
+        let mut s = playlist(&[10, 10]);
+        let snap = StoreSnapshot::default();
+        s.tick(t0, &snap);
+        s.pin(Some(1), t0 + secs(1));
+        assert_eq!(at(&mut s, t0, 3), ("#1".into(), 2));
+        s.notify(inline("n", 0, 10, 1));
+        assert_eq!(shown(&mut s, t0, 4), "n");
+        assert_eq!(at(&mut s, t0, 14), ("#1".into(), 3));
+        s.pin(None, t0 + secs(14));
+        // The playlist was frozen too: scene 0 had used 4 s by t=4.
+        assert_eq!(at(&mut s, t0, 15), ("#0".into(), 5));
+    }
+
+    #[test]
+    fn overflow_drops_the_lowest_priority_newest_first() {
+        let t0 = Instant::now();
+        let mut s = playlist(&[100]);
+        for i in 0..crate::notifications::MAX_QUEUE {
+            s.notify(inline(&format!("n{i}"), 0, 5, 1));
+        }
+        assert_eq!(s.notification_status().len(), 50);
+        s.notify(inline("urgent", 7, 5, 1));
+        let st = s.notification_status();
+        assert_eq!(st.len(), 50);
+        assert_eq!(st[0].summary, "urgent");
+        assert!(
+            !st.iter().any(|q| q.summary == "n49"),
+            "newest low one dropped"
+        );
+        assert!(st.iter().any(|q| q.summary == "n48"));
+        // A new lowest-priority one is itself dropped.
+        s.notify(inline("late", -1, 5, 1));
+        assert!(!s.notification_status().iter().any(|q| q.summary == "late"));
+        // The one showing is never dropped.
+        assert_eq!(shown(&mut s, t0, 0), "urgent");
+        for _ in 0..60 {
+            s.notify(inline("flood", 100, 5, 1));
+        }
+        let st = s.notification_status();
+        assert_eq!(st.len(), 50);
+        assert_eq!(st.iter().filter(|q| q.showing).count(), 1);
+        assert_eq!(st[0].summary, "urgent");
+    }
+
+    #[test]
+    fn reload_keeps_the_queue_and_drops_scenes_that_vanished() {
+        let t0 = Instant::now();
+        let mut old = playlist(&[10, 10]);
+        old.notify(scene_n("b", 9, 5));
+        old.notify(scene_n("a", 1, 5));
+        old.notify(inline("text", 0, 5, 1));
+        assert_eq!(at(&mut old, t0, 0), ("#1".into(), 0));
+        // The new config only has scene "a".
+        let mut new = playlist(&[10]);
+        new.adopt_queue(old.take_queue());
+        let st = new.notification_status();
+        let summaries: Vec<_> = st.iter().map(|q| (q.summary.as_str(), q.showing)).collect();
+        assert_eq!(summaries, [("scene:a", false), ("text", false)]);
+        assert_eq!(at(&mut new, t0, 1), ("#0".into(), 0));
+        assert!(old.notification_status().is_empty());
     }
 }

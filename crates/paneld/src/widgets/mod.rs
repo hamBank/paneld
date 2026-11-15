@@ -1,6 +1,7 @@
 //! Widgets draw into a zone (DESIGN.md §5.4).
 
 mod clock;
+mod icon;
 mod image;
 mod sparkline;
 mod text;
@@ -16,6 +17,7 @@ use crate::fonts::{self, Font, FontFace};
 use crate::store::StoreSnapshot;
 
 pub use clock::Clock;
+pub use icon::IconWidget;
 pub use image::Image;
 pub use sparkline::Sparkline;
 pub use text::Text;
