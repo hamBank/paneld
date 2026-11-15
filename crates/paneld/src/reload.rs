@@ -132,6 +132,8 @@ pub struct RestartOnly {
     pub canvas: (u32, u32),
     pub fps: u32,
     pub http_bind: SocketAddr,
+    /// `[http] token_env` and `data_prefix` (the API router is built once).
+    http_api: (Option<String>, String),
     /// `Debug` rendering of the `[[output]]` list. Outputs (preview and
     /// Colorlight sinks, including gamma, brightness and colour order) are
     /// set up once at start-up.
@@ -144,6 +146,7 @@ impl RestartOnly {
             canvas: (cfg.canvas.width, cfg.canvas.height),
             fps: cfg.canvas.fps,
             http_bind: cfg.http.bind,
+            http_api: (cfg.http.token_env.clone(), cfg.http.data_prefix.clone()),
             outputs: format!("{:?}", cfg.outputs),
         }
     }
@@ -156,6 +159,9 @@ impl RestartOnly {
         }
         if self.http_bind != new.http_bind {
             v.push("http.bind");
+        }
+        if self.http_api != new.http_api {
+            v.push("http.token_env/data_prefix");
         }
         if self.outputs != new.outputs {
             v.push("[[output]]");

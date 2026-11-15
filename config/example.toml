@@ -117,6 +117,12 @@ grid = true
 
 [http]
 bind = "127.0.0.1:8080"
+# Require `Authorization: Bearer <token>` on every /api/* route. NAME of an env
+# var holding the token; paneld refuses to start if it is unset or empty.
+# /preview* stays open. Without it the API is open: keep bind on loopback.
+# token_env = "PANELD_API_TOKEN"
+# Keys pushed with POST /api/data/<prefix>:<name> (must differ from every source prefix).
+# data_prefix = "push"
 
 # BDF fonts, usable as `font = "name"` in any text, clock or value widget.
 # `path` is relative to this file and is read when the config loads, so a

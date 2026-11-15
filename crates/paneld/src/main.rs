@@ -368,6 +368,8 @@ fn main() -> anyhow::Result<()> {
 fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
     let (cfg, loaded_text) = Config::load_with_text(&config_path)?;
     paneld::sources::check_environment(&cfg)?;
+    let api_settings =
+        paneld::api::ApiSettings::from_config(&cfg.http).map_err(anyhow::Error::msg)?;
     let (tx, rx) = frame_channel(cfg.canvas.width, cfg.canvas.height);
     let (reload_tx, reload_rx) = std::sync::mpsc::channel();
     let reload_ctx =
@@ -401,7 +403,7 @@ fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
         })
         .collect::<anyhow::Result<_>>()?;
 
-    let mut app = Router::new().merge(paneld::api::router(control.clone()));
+    let mut app = Router::new().merge(paneld::api::router(control.clone(), &store, api_settings));
     if let Some(p) = cfg.preview() {
         app = app.merge(preview::router(
             rx,

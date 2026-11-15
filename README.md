@@ -64,7 +64,7 @@ See [`config/example.toml`](config/example.toml). Unknown keys are rejected, and
 | `[canvas]` | `width`, `height`, `fps` (1–60, default 30) |
 | `[[output]]` | `type = "preview"`, `scale` (1–32, default 8), `grid` (default false) |
 | `[[output]]` | `type = "colorlight"`, `interface` (required), `gamma` (1.0–4.0, default 2.2), `brightness` (0–255, default 255), `white_point` (`#rrggbb`, default `#ffffff`), `brightness_mode` (`hardware` default, or `software`), `color_order` (`rgb` default, `rbg`, `grb`, `gbr`, `brg`, `bgr`: what the three wire bytes carry; the right value depends on the panel), `firmware_major` (optional override if discovery fails), `sync_gap_us` (0–20000, default 500). One output per interface. The whole canvas goes to card origin (0,0); multi-region maps come in M6. |
-| `[http]` | `bind` (default `127.0.0.1:8080`) |
+| `[http]` | `bind` (default `127.0.0.1:8080`), `token_env` (optional NAME of an env var holding the API bearer token), `data_prefix` (default `push`; namespace for `POST /api/data`). See HTTP control API below. |
 | `[playlist]` | `default_duration_s` (> 0, at most 86400, default 10): how long a scene is shown when it has no `duration_s` |
 | `[[font]]` | `name`, `path`: a BDF font file (path relative to the config file) usable as `font = "name"`; see Fonts below. Repeatable. |
 | `[[scene]]` | `name`, `duration_s` (optional, same range), `condition` (optional, see below), `[[scene.zone]]` with `rect = { x, y, w, h }`, `widget`, optional `background = "#rrggbb"` |
@@ -201,6 +201,26 @@ Payloads:
 - A payload that cannot be used (not JSON when `path` is set, path not found, not UTF-8) is logged once per topic, counted as an error and leaves the key unchanged.
 
 The password is read from the environment variable named by `password_env` (`paneld run` refuses to start if it is not set) and is never logged. Subscriptions use QoS 0. If the broker drops, the last values stay and show as stale; the source reconnects with backoff (1 s to 30 s) and subscribes again. Changing the source config takes a restart.
+
+### HTTP control API
+
+All routes live on the `[http] bind` address. Errors are always `{ "error": "..." }`. Commands (202) are applied by the render loop at the start of the next frame; a dead render loop gives 503. Request bodies are capped at 64 KiB (413) and the content type is not checked.
+
+If `[http] token_env` names an environment variable, every `/api/*` request needs `Authorization: Bearer <token>` (401 with `WWW-Authenticate: Bearer` otherwise). `paneld run` refuses to start if that variable is unset or empty. `/preview*` (and the future `/metrics`) are **never** authenticated. Without a token the API is open; paneld warns at start-up if that is on a non-loopback address.
+
+```bash
+H=http://localhost:8080 ; A='Authorization: Bearer '$PANELD_API_TOKEN   # drop -H "$A" if no token
+curl -H "$A" $H/api/state                                                       # 200: scenes, scene, pinned, notifications, on, brightness, dim, fps
+curl -H "$A" -d '{"text":"Washing done","icon":"bolt","duration_s":10,"priority":5}' $H/api/notify   # 202; or {"scene":"alert"}
+curl -H "$A" -X DELETE $H/api/notify                                            # 202: clear all notifications
+curl -H "$A" -d '{"value":12.5,"unit":"W"}' $H/api/data/push:power              # 200: also 42, "text", true; null removes the key
+curl -H "$A" -X POST $H/api/scene/home                                          # 202 (404 for an unknown scene)
+curl -H "$A" -X DELETE $H/api/scene                                             # 202: release the pin
+curl -H "$A" -d '{"value":128}' $H/api/brightness                               # 202: 0-255
+curl -H "$A" -d '{"on":false}' $H/api/power                                     # 202: blank / restore
+```
+
+`POST /api/data/{key}` writes into the store under the source name `http`. Keys must be `<data_prefix>:<name>` (`[http] data_prefix`, default `push`; name: letters, digits, `_ . -`, at most 128). Config validation rejects a `data_prefix` that any source uses (source names, `ha`, or the prefix of an explicitly configured key), so pushes cannot collide with source data; a push also never overwrites a key another source wrote (409). At most 1000 pushed keys. Use them in scenes like any key: `{push:power:.0}`. Numeric strings become numbers; arrays and objects are rejected.
 
 ### Live reload
 
