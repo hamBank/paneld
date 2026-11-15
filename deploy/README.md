@@ -1,5 +1,7 @@
 # Bring-up on the Raspberry Pi
 
+Installing on Debian, Ubuntu or Raspberry Pi OS (packages, binary, network port, service, firewall, upgrade, uninstall) is covered step by step in [`INSTALL-debian.md`](INSTALL-debian.md). This file covers the card side and the service details.
+
 How to get two 172x86 panels lit from a Colorlight 5A-75B. Run `paneld test-pattern` and `paneld probe` from a shell first (sections 1 to 4); only then put the card in `config.toml` and install the daemon as a systemd service (section 5). Section 6 is troubleshooting.
 
 Nothing here has been run against real hardware yet, and the systemd unit has so far only passed `systemd-analyze verify`, not a boot on a Pi. The settings below are what the design assumes, and the procedure is how to confirm them. Write down what you find (see "Record the result").
