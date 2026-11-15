@@ -240,7 +240,10 @@ fn send_pattern(
 ) -> anyhow::Result<()> {
     let (tx, rx) = frame_channel(a.width, a.height);
     let settings = SinkSettings::from_output(output, a.width, a.height);
-    let sink = colorlight_sink::spawn(settings, rx).context("starting the colorlight sink")?;
+    // Test patterns always run at full level.
+    let (_level_tx, level_rx) = tokio::sync::watch::channel(paneld::control::OutputLevel::FULL);
+    let sink =
+        colorlight_sink::spawn(settings, rx, level_rx).context("starting the colorlight sink")?;
     println!(
         "sending to {} at {fps} fps, brightness {}, gamma {}, colour order {:?}; Ctrl-C to stop",
         output.interface, output.brightness, output.gamma, output.color_order
@@ -379,8 +382,6 @@ fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
     // level (on/off, brightness) is for the sinks.
     let (control, control_link, output_level) =
         paneld::control::channel(cfg.scenes.iter().map(|s| s.name.clone()).collect());
-    // TODO(M4 brightness): hand `output_level` to the sinks.
-    let _output_level = output_level;
     let render = RenderLoop::from_config(&cfg, scene.as_deref(), store.clone())?
         .with_reload(reload_rx)
         .with_control(control_link)
@@ -396,7 +397,7 @@ fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
         })
         .map(|cl| {
             let settings = SinkSettings::from_output(cl, cfg.canvas.width, cfg.canvas.height);
-            colorlight_sink::spawn(settings, rx.clone())
+            colorlight_sink::spawn(settings, rx.clone(), output_level.clone())
                 .with_context(|| format!("starting colorlight sink on {}", cl.interface))
         })
         .collect::<anyhow::Result<_>>()?;
@@ -418,6 +419,12 @@ fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
             .with_context(|| format!("binding {}", cfg.http.bind))?;
         let sources = std::sync::Arc::new(tokio::sync::Mutex::new(
             paneld::sources::Supervisor::start(&cfg, &store),
+        ));
+        // Quiet hours / auto-dim (changes need a restart).
+        tokio::spawn(paneld::autodim::run(
+            paneld::autodim::AutoDim::new(cfg.quiet_hours.clone(), cfg.auto_dim.clone()),
+            store.clone(),
+            control.clone(),
         ));
         reload::spawn(
             reload_ctx,
