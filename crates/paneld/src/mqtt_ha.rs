@@ -366,7 +366,29 @@ fn fps_due(last: Option<(f32, Instant)>, now: Instant, fps: f32, every: Duration
 /// send error.
 #[derive(Debug)]
 pub struct CardMonitor {
-    sinks: Vec<(Arc<SinkStats>, u64, u64)>,
+    sinks: Vec<(Arc<SinkStats>, CardCheck)>,
+}
+
+/// One sink's health between two samples: true when it sent frames and had no
+/// send error since the previous sample. Shared with `/metrics`
+/// (`paneld_card_detected`), which keeps its own checks so scrapes and the
+/// Home Assistant sampling do not disturb each other.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CardCheck {
+    frames: u64,
+    errors: u64,
+}
+
+impl CardCheck {
+    pub fn sample(&mut self, s: &SinkStats) -> bool {
+        let (f, e) = (
+            s.frames_sent.load(Ordering::Relaxed),
+            s.send_errors.load(Ordering::Relaxed),
+        );
+        let ok = f > self.frames && e == self.errors;
+        (self.frames, self.errors) = (f, e);
+        ok
+    }
 }
 
 impl CardMonitor {
@@ -376,20 +398,18 @@ impl CardMonitor {
             return None;
         }
         Some(CardMonitor {
-            sinks: stats.into_iter().map(|s| (s, 0, 0)).collect(),
+            sinks: stats
+                .into_iter()
+                .map(|s| (s, CardCheck::default()))
+                .collect(),
         })
     }
 
     /// Compare the counters with the previous sample.
     pub fn sample(&mut self) -> bool {
         let mut ok = true;
-        for (s, frames, errors) in &mut self.sinks {
-            let (f, e) = (
-                s.frames_sent.load(Ordering::Relaxed),
-                s.send_errors.load(Ordering::Relaxed),
-            );
-            ok &= f > *frames && e == *errors;
-            (*frames, *errors) = (f, e);
+        for (s, check) in &mut self.sinks {
+            ok &= check.sample(s);
         }
         ok
     }

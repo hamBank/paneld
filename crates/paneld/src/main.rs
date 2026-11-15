@@ -423,6 +423,19 @@ fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
         let sources = std::sync::Arc::new(tokio::sync::Mutex::new(
             paneld::sources::Supervisor::start(&cfg, &store),
         ));
+        // GET /metrics: deliberately outside the API's auth layer (DESIGN.md §7.1).
+        let metrics = paneld::metrics::MetricsRegistry::new(
+            render.stats.clone(),
+            sinks
+                .iter()
+                .map(|s| (s.interface.clone(), s.stats.clone()))
+                .collect(),
+            sources.clone(),
+            reload_stats.clone(),
+            control.clone(),
+            store.clone(),
+        );
+        let app = app.merge(paneld::metrics::router(metrics));
         // Quiet hours / auto-dim (changes need a restart).
         tokio::spawn(paneld::autodim::run(
             paneld::autodim::AutoDim::new(cfg.quiet_hours.clone(), cfg.auto_dim.clone()),

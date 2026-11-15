@@ -21,6 +21,7 @@ pub mod format;
 pub mod icons;
 pub mod inline;
 pub mod media;
+pub mod metrics;
 pub mod mqtt_ha;
 pub mod notifications;
 pub mod png_io;
