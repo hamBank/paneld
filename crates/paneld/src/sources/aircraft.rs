@@ -646,7 +646,9 @@ impl Source for AircraftSource {
                 .build()
                 .context("building HTTP client")?;
             let url = fill_url(&cfg);
-            tracing::debug!(%url, "aircraft source url");
+            // Never log the URL: it is user-supplied and may carry an API key
+            // in its query string, and it holds the (rounded) home location.
+            tracing::debug!(source = %ctx.name, "aircraft source starting");
             // Distances are measured from the exact location, locally. Only
             // the rounded point is ever sent (fill_url).
             let origin = LatLon {

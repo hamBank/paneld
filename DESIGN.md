@@ -535,14 +535,16 @@ Prometheus metrics (prefix `paneld_`):
 - `store_keys`, `notifications_queued`
 - `config_reload_errors_total`, `current_scene{scene}` (info-style gauge)
 
-Logging: `tracing` with env-filter; JSON output option for journald.
+Logging: `tracing` with env-filter (`RUST_LOG`, default `info`), to stdout. `--log-format text|json` (global flag; env `PANELD_LOG_FORMAT`; default `text`) selects the format; `json` is one object per line (`timestamp`, `level`, `fields`, `target`) via tracing-subscriber's `json` feature (adds only `tracing-serde`). Text is the right choice for journald, which stores plain lines and adds its own metadata; JSON is for log shippers (Vector, Loki). ANSI colours only when stdout is a terminal. Secrets never reach log fields: tokens only come from `*_env` variables, and source URLs are never logged (they may hold query-string keys; reqwest errors are logged with `without_url()`). Implementation: `crates/paneld/src/logging.rs`.
 
 ---
 
 ## 11. Deployment (Pi)
 - Raspberry Pi 4/5, Raspberry Pi OS Lite 64-bit. Onboard Ethernet → LAN; USB 3 Gigabit adapter → Colorlight card (or the reverse; config picks the interface). Wi-Fi for LAN is also fine.
 - The card-facing interface gets **no IP config** (disable DHCP on it in NetworkManager/dhcpcd) so the OS doesn't spam it.
-- Cross-compile with `cross` for `aarch64-unknown-linux-gnu`, or build on-device.
+- Cross-compile for `aarch64-unknown-linux-gnu`: plain `cargo build --release --locked --target aarch64-unknown-linux-gnu -p paneld` with `gcc-aarch64-linux-gnu` installed (`.cargo/config.toml` sets the linker; `ring` finds the C compiler itself), or `cross` (no `Cross.toml` needed), or build on-device. `[profile.release]` uses thin LTO, `codegen-units = 1`, `strip` and keeps `panic = "unwind"` (thread panics are caught at `join`). About 11.7 MiB before, 6.8 MiB after.
+- The binary is dynamic against glibc (`libc`, `libm`, `libgcc_s`) and needs glibc >= 2.34 when linked against Ubuntu 24.04's cross sysroot: fine on Pi OS 12 Bookworm (2.36) and 13 Trixie (2.41), not Pi OS 11 Bullseye (2.31). Versions from packages.debian.org. If a newer sysroot ever raises that, build in an older container or use cargo-zigbuild with an explicit glibc target; not needed now.
+- CI (`.github/workflows/release.yml`) builds the binary on pushes to `main` and `v*` tags and uploads `paneld-aarch64-unknown-linux-gnu` (binary plus `.sha256`); a tag also attaches both to a GitHub release (`contents: write` only on that job). It fails if the binary needs glibc newer than 2.36 (Bookworm).
 - systemd unit (`deploy/paneld.service`): `DynamicUser=yes` or a dedicated user, `AmbientCapabilities=CAP_NET_RAW`, `CapabilityBoundingSet=CAP_NET_RAW`, `EnvironmentFile=/etc/paneld/env`, `Restart=on-failure`.
 - Card config (panel size/scan) done once in LEDVision from a Windows machine. Document the settings used in `deploy/README.md`.
 
