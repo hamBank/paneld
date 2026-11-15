@@ -65,6 +65,12 @@ enum Cmd {
         /// Pixel scale of the output image.
         #[arg(long, default_value_t = 1)]
         scale: u32,
+        /// Write the card-space framebuffer of this colorlight output (its
+        /// index among the `[[output]]` entries, as in config errors) instead
+        /// of the canvas: the canvas through the output map, without gamma,
+        /// white point or colour order.
+        #[arg(long)]
+        output: Option<usize>,
     },
     /// Render a hardware bring-up test pattern to a PNG and/or send it to the card.
     TestPattern(TestPatternArgs),
@@ -98,12 +104,26 @@ enum PatternArg {
 /// sink code `run` uses. At least one of the two is required.
 #[derive(Args)]
 struct TestPatternArgs {
-    /// Canvas width in pixels.
+    /// Canvas width in pixels (default with `--config`: the config's canvas).
     #[arg(long)]
-    width: u32,
-    /// Canvas height in pixels.
+    width: Option<u32>,
+    /// Canvas height in pixels (default with `--config`: the config's canvas).
     #[arg(long)]
-    height: u32,
+    height: Option<u32>,
+    /// Take the canvas size and the output map (`[[output.region]]`,
+    /// `card_size`) from this config's colorlight output `--output`. Other
+    /// settings still come from the flags below. With `--interface` the
+    /// pattern is drawn in canvas space and goes through the map.
+    #[arg(long, requires = "output")]
+    config: Option<PathBuf>,
+    /// Index of the colorlight `[[output]]` to use with `--config`.
+    #[arg(long, requires = "config")]
+    output: Option<usize>,
+    /// Draw the pattern directly in card coordinates, bypassing the regions
+    /// (size: the output's card space). Shows where each card pixel is, which
+    /// helps to find region mistakes. Needs `--config`.
+    #[arg(long, requires = "config")]
+    card_space: bool,
     /// Width of one panel (default: the canvas width).
     #[arg(long)]
     panel_width: Option<u32>,
@@ -152,14 +172,67 @@ struct TestPatternArgs {
     sync_gap_us: Option<u32>,
 }
 
+/// The colorlight output `--config`/`--output` select, and its canvas size.
+fn selected_output(
+    config: &std::path::Path,
+    index: usize,
+) -> anyhow::Result<(ColorlightOutput, (u32, u32))> {
+    let cfg = Config::load(config)?;
+    match cfg.outputs.get(index) {
+        Some(OutputConfig::Colorlight(cl)) => {
+            Ok((cl.clone(), (cfg.canvas.width, cfg.canvas.height)))
+        }
+        Some(_) => anyhow::bail!(
+            "output[{index}] in {} is not a colorlight output",
+            config.display()
+        ),
+        None => anyhow::bail!(
+            "{} has no output[{index}] ({} output(s))",
+            config.display(),
+            cfg.outputs.len()
+        ),
+    }
+}
+
 fn test_pattern_cmd(a: TestPatternArgs) -> anyhow::Result<()> {
+    let selected = match (&a.config, a.output) {
+        (Some(c), Some(i)) => Some(selected_output(c, i)?),
+        _ => None,
+    };
+    // The size the pattern is drawn in: the canvas, or with --card-space the
+    // card space.
+    let (width, height) = match &selected {
+        Some((cl, (cw, ch))) => {
+            let (w, h) = if a.card_space {
+                cl.output_map(*cw, *ch)
+                    .map_err(anyhow::Error::msg)?
+                    .card_size()
+            } else {
+                (*cw, *ch)
+            };
+            anyhow::ensure!(
+                a.width.is_none_or(|v| v == w) && a.height.is_none_or(|v| v == h),
+                "--width/--height (given: {:?} x {:?}) differ from the {} size {w}x{h}; leave them out",
+                a.width,
+                a.height,
+                if a.card_space { "card space" } else { "canvas" }
+            );
+            (w, h)
+        }
+        None => (
+            a.width
+                .context("--width is required (or give --config and --output)")?,
+            a.height
+                .context("--height is required (or give --config and --output)")?,
+        ),
+    };
     anyhow::ensure!(
-        (1..=4096).contains(&a.width) && (1..=4096).contains(&a.height),
-        "--width and --height must be 1..=4096"
+        (1..=4096).contains(&width) && (1..=4096).contains(&height),
+        "the pattern size must be 1..=4096 per side (got {width}x{height})"
     );
     let (pw, ph) = (
-        a.panel_width.unwrap_or(a.width),
-        a.panel_height.unwrap_or(a.height),
+        a.panel_width.unwrap_or(width),
+        a.panel_height.unwrap_or(height),
     );
     anyhow::ensure!(
         pw >= 1 && ph >= 1,
@@ -195,7 +268,7 @@ fn test_pattern_cmd(a: TestPatternArgs) -> anyhow::Result<()> {
         PatternArg::Walk => Pattern::Walk,
     };
     if let Some(out) = &a.out {
-        let canvas = test_pattern::render(pattern, a.width, a.height, pw, ph, a.frame);
+        let canvas = test_pattern::render(pattern, width, height, pw, ph, a.frame);
         std::fs::write(out, png_io::encode(&canvas, a.scale, false))
             .with_context(|| format!("writing {}", out.display()))?;
         println!("wrote {}", out.display());
@@ -229,8 +302,17 @@ fn test_pattern_cmd(a: TestPatternArgs) -> anyhow::Result<()> {
         color_order: a.color_order.unwrap_or_default(),
         firmware_major: a.firmware_major,
         sync_gap_us,
+        // The config's map, unless the pattern is already in card space.
+        regions: match &selected {
+            Some((cl, _)) if !a.card_space => cl.regions.clone(),
+            _ => Vec::new(),
+        },
+        card_size: match &selected {
+            Some((cl, _)) if !a.card_space => cl.card_size,
+            _ => None,
+        },
     };
-    send_pattern(&output, pattern, &a, (pw, ph), fps)
+    send_pattern(&output, pattern, &a, (width, height), (pw, ph), fps)
 }
 
 /// Send a test pattern to the card at `fps` until Ctrl-C, advancing the
@@ -239,11 +321,12 @@ fn send_pattern(
     output: &ColorlightOutput,
     pattern: Pattern,
     a: &TestPatternArgs,
+    (width, height): (u32, u32),
     (pw, ph): (u32, u32),
     fps: u32,
 ) -> anyhow::Result<()> {
-    let (tx, rx) = frame_channel(a.width, a.height);
-    let settings = SinkSettings::from_output(output, a.width, a.height);
+    let (tx, rx) = frame_channel(width, height);
+    let settings = SinkSettings::from_output(output, width, height)?;
     // Test patterns always run at full level.
     let (_level_tx, level_rx) = tokio::sync::watch::channel(paneld::control::OutputLevel::FULL);
     let sink =
@@ -265,7 +348,7 @@ fn send_pattern(
         loop {
             tokio::select! {
                 _ = tick.tick() => {
-                    let c = test_pattern::render(pattern, a.width, a.height, pw, ph, frame);
+                    let c = test_pattern::render(pattern, width, height, pw, ph, frame);
                     tx.send_replace(std::sync::Arc::new(c));
                     frame += 1;
                 }
@@ -286,6 +369,73 @@ fn send_pattern(
     Ok(())
 }
 
+/// The text `probe` prints for the receivers on one port: a table, the card
+/// space the port expects and any warnings. Offsets are not shown: no
+/// reference documents where a receiver reports its x/y position
+/// (PROTOCOL.md, "Multiple receivers").
+fn probe_report(cards: &[colorlight_proto::DiscoveryResponse]) -> String {
+    use std::fmt::Write as _;
+    let layout = colorlight_net::Layout::from_receivers(cards);
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "{:>8}  {:<9} {:<8} {:<13} offset",
+        "receiver", "model", "firmware", "reported size"
+    );
+    for c in cards {
+        let model = if c.model == colorlight_proto::MODEL_5A {
+            "5A".to_string()
+        } else {
+            format!("0x{:02x}", c.model)
+        };
+        let _ = writeln!(
+            out,
+            "{:>8}  {:<9} {:<8} {:<13} unknown",
+            c.receiver_index,
+            model,
+            format!("{}.{}", c.firmware_major, c.firmware_minor),
+            format!("{}x{}", c.width, c.height),
+        );
+    }
+    let _ = writeln!(out, "{} receiver(s) found", cards.len());
+    if let Some((w, h)) = layout.reported_extent {
+        let _ = writeln!(
+            out,
+            "card space the port expects: {w}x{h} (largest size any receiver reports; \
+             unconfirmed, see PROTOCOL.md, \"Multiple receivers\")"
+        );
+        if !layout.sizes_agree {
+            let _ = writeln!(
+                out,
+                "note: the receivers report different sizes; the references don't say \
+                 whether that is normal on a chain"
+            );
+        }
+    }
+    let _ = writeln!(
+        out,
+        "double sync (firmware >= 13): {}",
+        if layout
+            .highest_firmware_major
+            .is_some_and(colorlight_proto::needs_double_sync)
+        {
+            "yes"
+        } else {
+            "no"
+        }
+    );
+    // The sink compares the sizes with its own card space at startup; here
+    // only the firmware mix can be judged.
+    if layout.mixed_firmware() {
+        let w = colorlight_net::Warning::MixedFirmware {
+            new: layout.new_firmware,
+            old: layout.old_firmware,
+        };
+        let _ = writeln!(out, "warning: {w}");
+    }
+    out
+}
+
 fn probe_cmd(interface: &str, timeout_ms: u64) -> anyhow::Result<()> {
     anyhow::ensure!(
         (1..=10_000).contains(&timeout_ms),
@@ -299,23 +449,7 @@ fn probe_cmd(interface: &str, timeout_ms: u64) -> anyhow::Result<()> {
          Check the cable, that the card is powered and on this NIC, that the NIC has link, \
          and that the card's firmware answers raw Ethernet discovery"
     );
-    for c in &cards {
-        let model = if c.model == colorlight_proto::MODEL_5A {
-            "5A".to_string()
-        } else {
-            format!("unknown (0x{:02x})", c.model)
-        };
-        println!(
-            "receiver {}: model {model}, firmware {}.{}, reported size {}x{}, double sync: {}",
-            c.receiver_index,
-            c.firmware_major,
-            c.firmware_minor,
-            c.width,
-            c.height,
-            if c.needs_double_sync() { "yes" } else { "no" },
-        );
-    }
-    println!("{} receiver(s) found", cards.len());
+    print!("{}", probe_report(&cards));
     Ok(())
 }
 
@@ -348,6 +482,7 @@ fn main() -> anyhow::Result<()> {
             time,
             elapsed,
             scale,
+            output,
         } => {
             anyhow::ensure!(
                 elapsed.is_finite() && elapsed >= 0.0,
@@ -360,7 +495,10 @@ fn main() -> anyhow::Result<()> {
                 scene_elapsed: Duration::from_secs_f64(elapsed),
                 frame: 0,
             };
-            let canvas = render::render_scene(&cfg, &scene, &ctx, &Store::new().snapshot())?;
+            let mut canvas = render::render_scene(&cfg, &scene, &ctx, &Store::new().snapshot())?;
+            if let Some(i) = output {
+                canvas = render::card_frame(&cfg, i, &canvas)?;
+            }
             std::fs::write(&out, png_io::encode(&canvas, scale, false))
                 .with_context(|| format!("writing {}", out.display()))?;
             println!("wrote {}", out.display());
@@ -400,7 +538,7 @@ fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
             _ => None,
         })
         .map(|cl| {
-            let settings = SinkSettings::from_output(cl, cfg.canvas.width, cfg.canvas.height);
+            let settings = SinkSettings::from_output(cl, cfg.canvas.width, cfg.canvas.height)?;
             colorlight_sink::spawn(settings, rx.clone(), output_level.clone())
                 .with_context(|| format!("starting colorlight sink on {}", cl.interface))
         })
@@ -542,6 +680,48 @@ mod cli_tests {
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(std::iter::once("paneld").chain(args.iter().copied()))
+    }
+
+    fn rx(index: u8, major: u8, w: u16, h: u16) -> colorlight_proto::DiscoveryResponse {
+        colorlight_proto::DiscoveryResponse {
+            model: colorlight_proto::MODEL_5A,
+            firmware_major: major,
+            firmware_minor: 4,
+            width: w,
+            height: h,
+            receiver_index: index,
+            packets_received: 0,
+            uptime_ms: 0,
+        }
+    }
+
+    #[test]
+    fn probe_report_for_a_two_receiver_chain() {
+        let out = probe_report(&[rx(0, 11, 128, 64), rx(1, 11, 128, 64)]);
+        let want = "\
+receiver  model     firmware reported size offset
+       0  5A        11.4     128x64        unknown
+       1  5A        11.4     128x64        unknown
+2 receiver(s) found
+card space the port expects: 128x64 (largest size any receiver reports; unconfirmed, see PROTOCOL.md, \"Multiple receivers\")
+double sync (firmware >= 13): no
+";
+        assert_eq!(out, want);
+    }
+
+    #[test]
+    fn probe_report_warns_about_mixed_firmware_and_differing_sizes() {
+        let out = probe_report(&[rx(0, 11, 64, 32), rx(1, 13, 128, 64)]);
+        assert!(out.contains("card space the port expects: 128x64"), "{out}");
+        assert!(
+            out.contains("note: the receivers report different sizes"),
+            "{out}"
+        );
+        assert!(out.contains("double sync (firmware >= 13): yes"), "{out}");
+        assert!(
+            out.contains("warning: receivers [1] run firmware >= 13 and receivers [0] older"),
+            "{out}"
+        );
     }
 
     #[test]

@@ -6,6 +6,9 @@
 //! sending the request three times in a row (a card that has just been
 //! powered or is busy sometimes misses a single request). We give later
 //! indices two attempts, so one lost frame doesn't hide the rest of a chain.
+//! A receiver that stays silent still ends the walk (FPP does the same), so
+//! receivers after it are not found; nothing in the references says whether
+//! indices on a chain can have gaps.
 
 use std::time::{Duration, Instant};
 
@@ -175,6 +178,67 @@ mod tests {
         assert_eq!(idx, vec![0, 1, 2]);
         // 0, 1, 2 answered first time; index 3 is tried twice.
         assert_eq!(requests(&link), vec![0, 1, 2, 3, 3]);
+    }
+
+    #[test]
+    fn one_two_and_three_receivers() {
+        for n in 1..=3u8 {
+            let mut link = chain(vec![11; usize::from(n)]);
+            let found = discover(&mut link, T).unwrap();
+            let idx: Vec<_> = found.iter().map(|r| r.receiver_index).collect();
+            assert_eq!(idx, (0..n).collect::<Vec<_>>(), "{n} receivers");
+            let l = crate::Layout::from_receivers(&found);
+            assert_eq!(l.receiver_count, usize::from(n));
+            assert_eq!(l.reported_extent, Some((128, 64)));
+            assert!(!l.mixed_firmware());
+            // Every index is asked once, then the first silent one twice.
+            let mut want: Vec<u8> = (0..=n).collect();
+            want.push(n);
+            assert_eq!(requests(&link), want);
+        }
+    }
+
+    /// A receiver that never answers ends the walk: FPP stops at the first
+    /// silent index (PROTOCOL.md), so receiver 2 is not found. This documents
+    /// the limit, it is not a claim that the chain behaves so.
+    #[test]
+    fn a_silent_receiver_hides_the_ones_after_it() {
+        let mut link = MockLink::with_responder(|frame| {
+            let i = frame[16];
+            if i == 1 {
+                vec![] // receiver 1 does not answer
+            } else if i <= 2 {
+                vec![reply_as(i, 11)]
+            } else {
+                vec![]
+            }
+        });
+        let found = discover(&mut link, T).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].receiver_index, 0);
+        assert_eq!(requests(&link), vec![0, 1, 1]);
+    }
+
+    /// Mixed firmware and differing sizes survive discovery and are reported
+    /// by the layout summary.
+    #[test]
+    fn layout_of_a_mixed_chain() {
+        let mut link = MockLink::with_responder(|frame| {
+            let i = frame[16];
+            if i >= 2 {
+                return vec![];
+            }
+            let mut r = reply_as(i, if i == 0 { 11 } else { 13 });
+            r[35] = 0x40 * (i + 1); // width 64 for receiver 0, 128 for 1
+            vec![r]
+        });
+        let found = discover(&mut link, T).unwrap();
+        let l = crate::Layout::from_receivers(&found);
+        assert_eq!(l.receiver_count, 2);
+        assert!(l.mixed_firmware());
+        assert_eq!(l.reported_extent, Some((128, 64)));
+        assert!(!l.sizes_agree);
+        assert_eq!((l.old_firmware, l.new_firmware), (vec![0], vec![1]));
     }
 
     #[test]

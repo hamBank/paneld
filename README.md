@@ -30,7 +30,14 @@ Architecture, config schema and roadmap are in [`DESIGN.md`](DESIGN.md).
 - Pi cross-compiling with a CI release build;
 - `--log-format json`.
 
-Next: multi-region / multi-card output and rotation (M6). See `DESIGN.md` §14.
+**M6 (scale) is done:**
+- an output map from canvas regions to card space, with rotation and flip per region, e.g. an upside-down panel (see [Output map](#output-map-regions-rotation-flip));
+- `render --output` and `test-pattern --card-space` for checking a map without hardware;
+- multi-receiver discovery, with a `probe` table and layout warnings.
+
+Addressing of daisy-chained cards is inferred from the protocol references, not confirmed on hardware; see `crates/colorlight-proto/PROTOCOL.md`.
+
+Optional next: a video zone (M7). See `DESIGN.md` §14.
 
 ## Hardware
 
@@ -56,7 +63,7 @@ cargo run -p paneld -- render --config config/example.toml --scene home --out fr
 cargo run -p paneld -- test-pattern --width 172 --height 172 --panel-width 172 --panel-height 86 --pattern panel-ids --out pattern.png --scale 4
 ```
 
-`test-pattern` draws a bring-up pattern for checking the card's mapping: `bars`, `gradient`, `panel-ids` (border colour, index number and a top-left corner marker per panel, row-major from the top-left), `grid` (every 8 px, with each panel's top and left edge in cyan and its scan-half row `panel-height / 2` in yellow), `solid` (`--color "#rrggbb"`, default white) and `walk` (one pixel in raster order, position set by `--frame`). Panels default to the whole canvas, and partial panels at the edges are clipped. `--out` writes a PNG (`--scale` works as for `render`). `--interface <nic>` sends the pattern to the card continuously until Ctrl-C (`walk` animates), with `--fps` (default 30), `--brightness` (default 64), `--gamma` (default 1.0), `--color-order`, `--firmware-major` and `--sync-gap-us`. Give `--out`, `--interface` or both. Sending needs `CAP_NET_RAW`; see [`deploy/README.md`](deploy/README.md).
+`test-pattern` draws a bring-up pattern for checking the card's mapping: `bars`, `gradient`, `panel-ids` (border colour, index number and a top-left corner marker per panel, row-major from the top-left), `grid` (every 8 px, with each panel's top and left edge in cyan and its scan-half row `panel-height / 2` in yellow), `solid` (`--color "#rrggbb"`, default white) and `walk` (one pixel in raster order, position set by `--frame`). Panels default to the whole canvas, and partial panels at the edges are clipped. `--out` writes a PNG (`--scale` works as for `render`). `--interface <nic>` sends the pattern to the card continuously until Ctrl-C (`walk` animates), with `--fps` (default 30), `--brightness` (default 64), `--gamma` (default 1.0), `--color-order`, `--firmware-major` and `--sync-gap-us`. Give `--out`, `--interface` or both. Sending needs `CAP_NET_RAW`; see [`deploy/README.md`](deploy/README.md). With `--config <file> --output <n>` the canvas size and the output's regions come from that colorlight `[[output]]` (so `--width`/`--height` can be left out): the pattern is drawn in canvas space and goes through the output map. Add `--card-space` to draw it directly in card coordinates instead, bypassing the regions (the size is the output's card space); a pattern that looks right there but wrong through the map means a region is mis-set.
 
 ```bash
 paneld probe --interface eth1            # list cards: model, firmware, reported size
@@ -67,6 +74,8 @@ paneld test-pattern --width 172 --height 172 --panel-height 86 --pattern panel-i
 
 `render` also takes `--time <RFC 3339>` and `--elapsed <seconds>` for reproducible output.
 
+`render --output <n>` writes the card-space framebuffer of colorlight `[[output]]` number `n` (counting every `[[output]]`, as in config error messages) instead of the canvas: what the card is sent, before gamma, white point and colour order, like the preview. Use it to check an output map without hardware.
+
 ## Config (M2)
 
 See [`config/example.toml`](config/example.toml). Unknown keys are rejected, and validation reports every problem at once.
@@ -75,7 +84,8 @@ See [`config/example.toml`](config/example.toml). Unknown keys are rejected, and
 |---|---|
 | `[canvas]` | `width`, `height`, `fps` (1–60, default 30) |
 | `[[output]]` | `type = "preview"`, `scale` (1–32, default 8), `grid` (default false) |
-| `[[output]]` | `type = "colorlight"`, `interface` (required), `gamma` (1.0–4.0, default 2.2), `brightness` (0–255, default 255), `white_point` (`#rrggbb`, default `#ffffff`), `brightness_mode` (`hardware` default, or `software`), `color_order` (`rgb` default, `rbg`, `grb`, `gbr`, `brg`, `bgr`: what the three wire bytes carry; the right value depends on the panel), `firmware_major` (optional override if discovery fails), `sync_gap_us` (0–20000, default 500). One output per interface. The whole canvas goes to card origin (0,0); multi-region maps come in M6. |
+| `[[output]]` | `type = "colorlight"`, `interface` (required), `gamma` (1.0–4.0, default 2.2), `brightness` (0–255, default 255), `white_point` (`#rrggbb`, default `#ffffff`), `brightness_mode` (`hardware` default, or `software`), `color_order` (`rgb` default, `rbg`, `grb`, `gbr`, `brg`, `bgr`: what the three wire bytes carry; the right value depends on the panel), `firmware_major` (optional override if discovery fails), `sync_gap_us` (0–20000, default 500). One output per interface. Without regions the whole canvas goes to card origin (0,0). |
+| `[[output]]` (colorlight, optional) | `card_size = { w, h }` (the card's whole display space; default: the bounding box of the regions) and `[[output.region]]` tables: `canvas = { x, y, w, h }`, `card_offset = { x, y }` (default 0,0), `rotate` (`0` default, `90`, `180`, `270`, clockwise), `flip` (`none` default, `horizontal`, `vertical`). See [Output map](#output-map-regions-rotation-flip). |
 | `[http]` | `bind` (default `127.0.0.1:8080`), `token_env` (optional NAME of an env var holding the API bearer token), `data_prefix` (default `push`; namespace for `POST /api/data`). See HTTP control API below. |
 | `[mqtt]` | optional, Home Assistant entities: `host`, `port` (1883), `username`, `password_env`, `discovery_prefix` (`homeassistant`), `node_id` (`paneld`), `base_topic` (`paneld/<node_id>`); see Home Assistant (MQTT) below |
 | `[playlist]` | `default_duration_s` (> 0, at most 86400, default 10): how long a scene is shown when it has no `duration_s` |
@@ -319,6 +329,42 @@ Raw notifications go to `<base_topic>/notify` as the JSON of `POST /api/notify` 
 - **Rejected:** a changed `canvas` width or height, since scenes laid out for a new size would not fit the running canvas. Restart to resize.
 - **Errors never take the panel down.** A parse or validation error, an unreadable image, a canvas size change, or (with `run --scene X`) a config that no longer has scene `X` is logged with the full message, counted in `reload_errors`, and the old config keeps running. Fix the file and the next change is picked up. With `--scene X`, scene `X` stays on screen across reloads.
 - **Limitations:** image files referenced by the config are not watched; after replacing one, make any edit to the config or send SIGHUP.
+
+## Output map (regions, rotation, flip)
+
+The engine draws one logical canvas. A colorlight output sends *card space*: the card's own rows and columns. By default the whole canvas goes to the card at (0,0), which is right when the panels are wired as one picture. `[[output.region]]` maps canvas rectangles into card space, optionally rotated and flipped, for example when a panel is mounted upside down or the card's panels are not in canvas order.
+
+Two 172x86 panels stacked into a 172x172 canvas on one card, the bottom panel mounted upside down:
+
+```toml
+[canvas]
+width = 172
+height = 172
+
+[[output]]
+type = "colorlight"
+interface = "eth1"
+card_size = { w = 172, h = 172 }      # optional; keys of the output go before its regions
+
+[[output.region]]                      # top panel, as it is
+canvas = { x = 0, y = 0, w = 172, h = 86 }
+
+[[output.region]]                      # bottom panel, turned 180 degrees
+canvas = { x = 0, y = 86, w = 172, h = 86 }
+card_offset = { x = 0, y = 86 }        # where its top-left ends up in card space
+rotate = 180
+```
+
+Semantics:
+
+- A region copies the canvas rectangle `canvas`, then applies **`flip` first**, then **`rotate`**, then places the result with its top-left corner at `card_offset`. `flip = "horizontal"` mirrors left and right, `"vertical"` top and bottom, of the region as it looks on the canvas, whatever the rotation.
+- `rotate` is **clockwise**. `90` moves the region's top edge to the right side of its footprint (its top-left pixel goes to the top-right corner); `180` turns it upside down; `270` moves the top edge to the left side. With 90 or 270 the footprint on the card is `h x w`, not `w x h`.
+- Regions must lie inside the canvas and must not overlap **in card space**. They may overlap in canvas space, so one area can be shown twice (for instance mirrored). Errors name the output and region, e.g. `output[0] (colorlight) region[1]: overlaps region[0] in card space`.
+- `card_size` is the card's whole display space (default: the smallest box from the card origin that holds all regions). Every region must fit in it. Card pixels no region covers are **black**: the sink sends every row of the card space every frame, because the card keeps showing whatever it last received.
+- Without regions the output behaves as before: one implicit region, the whole canvas at (0,0). `card_size` may still be set to a larger card.
+- The discovery warning compares the card's reported size with the card space, not the canvas.
+
+Check a map without hardware with `paneld render --config c.toml --scene s --output 0 --out card.png`, and on the real card with `paneld test-pattern --config c.toml --output 0 --interface eth1 --pattern panel-ids` (add `--card-space` to bypass the regions). One output is one NIC, with one card space; rows and offsets are those of the card (or the daisy chain, if its cards share one coordinate space).
 
 ## Metrics
 

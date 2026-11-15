@@ -22,6 +22,7 @@ use crate::fonts::{self, FontFace};
 use crate::format::NumberFormat;
 use crate::icons;
 use crate::media::Media;
+use crate::output_map::{self, CardSize, OutputMap, RegionConfig};
 
 pub const MAX_FPS: u32 = 60;
 pub const MAX_PREVIEW_SCALE: u32 = 32;
@@ -566,8 +567,9 @@ pub enum OutputConfig {
 
 /// A Colorlight 5A-75B card reached over raw Ethernet (DESIGN.md §4, §8).
 ///
-/// In M1 one output maps the whole canvas to card origin (0,0); multi-region
-/// output maps arrive in M6.
+/// Without `[[output.region]]` the whole canvas goes to card origin (0,0).
+/// With regions, each maps a canvas rectangle into the card's coordinate
+/// space, rotated and flipped as configured (`output_map.rs`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ColorlightOutput {
@@ -596,9 +598,22 @@ pub struct ColorlightOutput {
     /// Pause between the last row packet and the display frame, in µs.
     #[serde(default = "default_sync_gap_us")]
     pub sync_gap_us: u32,
+    /// Canvas regions mapped into card space (`[[output.region]]`). Empty:
+    /// one implicit region, the whole canvas at card origin.
+    #[serde(default, rename = "region")]
+    pub regions: Vec<RegionConfig>,
+    /// The card's whole display space, which bounds the regions. Default:
+    /// the bounding box of the mapped regions, from the card origin.
+    #[serde(default)]
+    pub card_size: Option<CardSize>,
 }
 
 impl ColorlightOutput {
+    /// The output map for this output on a canvas of the given size.
+    pub fn output_map(&self, canvas_w: u32, canvas_h: u32) -> Result<OutputMap, String> {
+        OutputMap::new(canvas_w, canvas_h, &self.regions, self.card_size)
+    }
+
     /// The brightness byte to put in the card's display frame: the configured
     /// brightness in hardware mode, 255 in software mode (the LUT scales).
     pub fn card_brightness(&self) -> u8 {
@@ -1305,6 +1320,13 @@ impl Config {
                             cl.sync_gap_us
                         ));
                     }
+                    output_map::validate(
+                        &at,
+                        (c.width, c.height),
+                        &cl.regions,
+                        cl.card_size,
+                        &mut errs,
+                    );
                 }
             }
         }
