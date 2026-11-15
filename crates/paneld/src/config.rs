@@ -640,14 +640,29 @@ fn default_scale() -> u32 {
 pub struct HttpConfig {
     #[serde(default = "default_bind")]
     pub bind: SocketAddr,
+    /// NAME of an environment variable holding the bearer token every
+    /// `/api/*` request must present. Unset: the API is open. `/preview*`
+    /// is never authenticated.
+    #[serde(default)]
+    pub token_env: Option<String>,
+    /// Namespace for `POST /api/data/{key}`: pushed keys must look like
+    /// `<data_prefix>:<name>`. It must not be used by any source.
+    #[serde(default = "default_data_prefix")]
+    pub data_prefix: String,
 }
 
 impl Default for HttpConfig {
     fn default() -> Self {
         HttpConfig {
             bind: default_bind(),
+            token_env: None,
+            data_prefix: default_data_prefix(),
         }
     }
+}
+
+fn default_data_prefix() -> String {
+    "push".into()
 }
 
 fn default_bind() -> SocketAddr {
@@ -969,6 +984,36 @@ impl Config {
         Ok((cfg, text))
     }
 
+    /// Every store-key prefix (the part before `:`) that a configured source
+    /// writes under: each source's name, `ha` for Home Assistant (which
+    /// always writes `ha:` keys) and the prefixes of keys named explicitly
+    /// in `static`, `mqtt`, `http_poll` and `prometheus` sources.
+    pub fn source_key_prefixes(&self) -> std::collections::BTreeSet<String> {
+        let mut out: std::collections::BTreeSet<String> = self.sources.keys().cloned().collect();
+        let mut explicit: Vec<&String> = Vec::new();
+        for src in self.sources.values() {
+            match src {
+                SourceConfig::Static(c) => explicit.extend(c.values.keys()),
+                SourceConfig::Mqtt(c) => explicit.extend(c.topics.keys()),
+                SourceConfig::HttpPoll(c) => explicit.extend(c.extract.keys()),
+                SourceConfig::Prometheus(c) => {
+                    explicit.extend(c.queries.keys());
+                    explicit.extend(c.range_queries.keys());
+                }
+                SourceConfig::HomeAssistant(_) => {
+                    out.insert("ha".to_owned());
+                }
+                SourceConfig::Aircraft(_) => {}
+            }
+        }
+        out.extend(
+            explicit
+                .into_iter()
+                .filter_map(|k| k.split_once(':').map(|(p, _)| p.to_owned())),
+        );
+        out
+    }
+
     /// Parse and validate config text. Relative media paths resolve against
     /// the working directory; use [`Config::load`] or [`Config::parse_in`] to
     /// anchor them elsewhere.
@@ -1205,6 +1250,35 @@ impl Config {
 
         if self.scenes.is_empty() {
             errs.push("at least one [[scene]] is required".into());
+        }
+        if let Some(var) = &self.http.token_env {
+            let ok = !var.is_empty()
+                && var.len() <= 64
+                && !var.starts_with(|ch: char| ch.is_ascii_digit())
+                && var
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+            if !ok {
+                errs.push(
+                    "http.token_env must be the NAME of an environment variable (letters, digits and '_', e.g. \"PANELD_API_TOKEN\"), not the token itself"
+                        .into(),
+                );
+            }
+        }
+        let prefix = &self.http.data_prefix;
+        if prefix.is_empty()
+            || !prefix
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        {
+            errs.push(
+                "http.data_prefix may only use letters, digits, '_' and '-' and must not be empty"
+                    .into(),
+            );
+        } else if self.source_key_prefixes().contains(prefix) {
+            errs.push(format!(
+                "http.data_prefix {prefix:?} is also used by a source; pick another so pushed values cannot collide with source keys"
+            ));
         }
         let mut names = HashSet::new();
         for (name, src) in &self.sources {

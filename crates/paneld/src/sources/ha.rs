@@ -149,6 +149,12 @@ impl Secret {
     pub fn expose(&self) -> &str {
         &self.0
     }
+
+    /// A secret with a known value, for tests in other modules.
+    #[cfg(test)]
+    pub(crate) fn for_test(value: &str) -> Secret {
+        Secret(value.to_owned())
+    }
 }
 
 /// Read a secret from the environment variable `var`; `what` says what it

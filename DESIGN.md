@@ -340,15 +340,20 @@ A local source can poll every 1 s, since there is no external limit. Internally 
 - **Pinning** is in the scheduler. A pinned scene shows regardless of its condition, while the playlist's own clock keeps running. A pin survives config reloads by scene name, and is released if the scene disappears.
 
 ### 7.1 HTTP (axum)
-- `GET  /metrics`: Prometheus
-- `GET  /preview.png`: current frame (scaled ×N, optional pixel-grid look)
-- `GET  /preview`: tiny HTML page that refreshes / shows an MJPEG stream
-- `POST /api/notify`: `{ "text": "...", "icon": "...", "color": "#ff0000", "duration_s": 10, "priority": 5 }`
-- `POST /api/data/{key}`: push a value into the store
-- `POST /api/scene/{name}`: pin scene; `DELETE /api/scene`: release
-- `POST /api/brightness`: `{ "value": 0-255 }`
-- `GET  /api/state`: current scene, notification queue, card status
-- Bind address configurable; optional bearer token.
+- `GET  /metrics`: Prometheus (M5)
+- `GET  /preview.png`, `GET /preview`: current frame / tiny HTML page. Never authenticated.
+- `GET  /api/state`: current scene, pin, notification queue, on/off, brightness, dim, fps (200)
+- `POST /api/notify`: `{ "text": "...", "icon": "...", "color": "#ff0000", "duration_s": 10, "priority": 5 }` or `{ "scene": "..." }` (202; 400 on bad input); `DELETE /api/notify` clears all (202)
+- `POST /api/data/{key}`: push a value into the store (200; 400; 409)
+- `POST /api/scene/{name}`: pin scene (202; 404 unknown); `DELETE /api/scene`: release (202)
+- `POST /api/brightness`: `{ "value": 0-255 }` (202)
+- `POST /api/power`: `{ "on": bool }` (202). Added in M4 because HA's `light` entity needs on/off separately from brightness.
+- Bind address configurable.
+
+As built (`api.rs`):
+- **Errors** are always `{ "error": "..." }`: 400 (bad input), 401 (auth), 404, 409, 413 (body over 64 KiB), 503 (render loop gone). Bodies are parsed with `serde_json` from raw bytes instead of axum's `Json` extractor, so malformed JSON, unknown fields and a missing content type give clear 400s rather than axum's plain-text rejections.
+- **Auth:** optional `[http] token_env` (name of an env var). When set, every `/api/*` route needs `Authorization: Bearer <token>`, compared in constant time (hand-written, no crate); otherwise 401 with `WWW-Authenticate: Bearer`. A set but missing/empty variable fails `run` at start-up, naming the variable. `/preview*` and `/metrics` stay open (documented limitation; put a reverse proxy in front if that matters). An unauthenticated API on a non-loopback bind logs a warning. The token is a `Secret` (redacted `Debug`). `token_env` and `data_prefix` are restart-only.
+- **`POST /api/data/{key}` namespace (decision):** pushed keys must be `<data_prefix>:<name>` (`[http] data_prefix`, default `push`). Config validation rejects a `data_prefix` that any source uses (source names, `ha`, and prefixes of explicit keys in `static`/`mqtt`/`http_poll`/`prometheus`), so a push can never fight a source, including after a reload. Rationale: sources name their keys freely (`prom:x` under any source name), so "not a source's prefix" can only be decided against a dedicated namespace; a blocklist would break on every config change. As a second guard, a push never overwrites or removes a key whose entry was written by another source (409), and at most 1000 keys can be pushed (409). Values are stamped with source `http`. Body: number, string, bool, `null` (removes the key) or `{ "value": ..., "unit": "W" }`; via `extract::to_value`, so numeric strings become numbers. Arrays and objects are rejected.
 
 ### 7.2 MQTT + Home Assistant discovery
 Publish discovery configs so HA auto-creates one device with:
