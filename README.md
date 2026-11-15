@@ -26,7 +26,7 @@ Architecture, config schema and roadmap are in [`DESIGN.md`](DESIGN.md).
 
 **M5 (ops) is done:**
 - Prometheus `/metrics`;
-- a hardened systemd unit and install guide in [`deploy/`](deploy/README.md);
+- a hardened systemd unit, a [Debian/Ubuntu/Pi OS install guide](deploy/INSTALL-debian.md) and a [bring-up and service guide](deploy/README.md);
 - Pi cross-compiling with a CI release build;
 - `--log-format json`.
 
