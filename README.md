@@ -141,6 +141,24 @@ A `condition` is a small expression over store keys:
 
 Conditions are parsed when the config loads; errors name the scene and the expression.
 
+### Notifications
+
+A notification is a short-lived alert shown over everything else. It is queued through the control plane (`Command::Notify`; the HTTP and MQTT front ends are part of M4) with a priority, a duration per showing, a repeat count and either a configured scene or inline `text` (with optional `icon` and `color`).
+
+- The highest priority shows first; equal priorities go in arrival order. A strictly higher priority interrupts the one on screen, which goes back to the queue and later continues with the time it had left.
+- `repeat = N` shows it N times back-to-back.
+- While a notification shows, the playlist is frozen. When the queue is empty the playlist resumes on the same scene with the same time left. A pinned scene is interrupted too, and shown again afterwards.
+- Clearing empties the queue and ends the current notification. The queue holds 50; when full the lowest priority one is dropped (with a warning). A config reload keeps the queue and drops scene notifications whose scene is gone.
+- Inline notifications are drawn full-screen: icon and text centred in the given colour, in the largest font that fits. Text too wide even for the smallest font scrolls.
+
+```toml
+# All optional.
+[notifications]
+font = "spleen-16x32"   # a built-in or [[font]] name; default: the largest built-in font that fits
+font_scale = 1          # 1..=8; default: the largest scale that fits
+background = "#000000"
+```
+
 ### Data sources
 
 Sources (`[sources.<name>]`, each with a `type`) write store keys that widgets and conditions read. They run in the background and are restarted with backoff if they fail. The render loop never waits on them.

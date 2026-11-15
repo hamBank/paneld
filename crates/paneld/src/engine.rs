@@ -15,10 +15,11 @@ use tokio::sync::watch;
 use anyhow::Context;
 
 use crate::canvas::Canvas;
-use crate::config::Config;
-use crate::control::{Command, ControlLink, OutputLevel, Status};
+use crate::config::{Config, NotificationsConfig};
+use crate::control::{Command, ControlLink, NotificationContent, OutputLevel, Status};
+use crate::inline;
 use crate::scene::Scene;
-use crate::scheduler::Scheduler;
+use crate::scheduler::{Scheduler, Target};
 use crate::store::Store;
 use crate::widgets::FrameCtx;
 
@@ -40,6 +41,8 @@ pub struct SceneSet {
     /// refer to this list.
     pub scenes: Vec<Scene>,
     pub scheduler: Scheduler,
+    /// Look of inline notifications.
+    pub notifications: NotificationsConfig,
 }
 
 impl SceneSet {
@@ -72,6 +75,7 @@ impl SceneSet {
                 .map(|&i| Scene::from_config(&cfg.scenes[i]))
                 .collect(),
             scheduler,
+            notifications: cfg.notifications.clone(),
         })
     }
 }
@@ -84,6 +88,11 @@ pub struct RenderLoop {
     /// refer to this list.
     pub scenes: Vec<Scene>,
     pub scheduler: Scheduler,
+    /// Look of inline notifications.
+    pub notifications: NotificationsConfig,
+    /// The scene built for the inline notification showing, with the key of
+    /// that showing (so it is built once per showing, not per frame).
+    inline: Option<((u64, u32), Scene)>,
     pub store: Store,
     /// Prepared scene sets from the config reloader. Polled without blocking
     /// at the top of every frame.
@@ -150,6 +159,8 @@ impl RenderLoop {
             fps: cfg.canvas.fps,
             scenes: set.scenes,
             scheduler: set.scheduler,
+            notifications: set.notifications,
+            inline: None,
             store,
             reload: None,
             control: None,
@@ -186,9 +197,27 @@ impl RenderLoop {
                         tracing::info!("scene pin released");
                     }
                 }
-                Command::Notify(_) | Command::ClearNotifications => {
-                    // TODO(M4 notifications): queue in the scheduler.
-                    tracing::warn!("notifications are not implemented yet");
+                Command::Notify(n) => {
+                    let known = match &n.content {
+                        NotificationContent::Scene(name) => {
+                            self.scenes.iter().any(|s| s.name() == name)
+                        }
+                        NotificationContent::Inline { .. } => true,
+                    };
+                    if known {
+                        tracing::info!(
+                            priority = n.priority,
+                            repeat = n.repeat,
+                            "notification queued"
+                        );
+                        self.scheduler.notify(n);
+                    } else {
+                        tracing::warn!("notification for an unknown scene ignored");
+                    }
+                }
+                Command::ClearNotifications => {
+                    self.scheduler.clear_notifications();
+                    tracing::info!("notifications cleared");
                 }
                 Command::SetPower(on) => {
                     output_changed |= self.state.on != on;
@@ -218,7 +247,7 @@ impl RenderLoop {
             scenes: self.scenes.iter().map(|s| s.name().to_owned()).collect(),
             scene: scene.map(|i| self.scenes[i].name().to_owned()),
             pinned: self.state.pinned.clone(),
-            notifications: Vec::new(),
+            notifications: self.scheduler.notification_status(),
             on: self.state.on,
             brightness: self.state.brightness,
             dim: self.state.dim,
@@ -255,7 +284,11 @@ impl RenderLoop {
         }
         let Some(set) = latest else { return false };
         self.scenes = set.scenes;
+        let queue = self.scheduler.take_queue();
         self.scheduler = set.scheduler;
+        self.scheduler.adopt_queue(queue);
+        self.notifications = set.notifications;
+        self.inline = None;
         tracing::info!("config reloaded: {} scenes", self.scenes.len());
         // Keep a pin across the reload, by name.
         if let Some(name) = &self.state.pinned {
@@ -315,10 +348,11 @@ impl RenderLoop {
 
             let snapshot = self.store.snapshot();
             let active = self.scheduler.tick(Instant::now(), &snapshot);
-            let current = active.map(|a| a.index);
+            let current = active.as_ref().and_then(|a| a.index());
             if shown != Some(current) {
                 match current {
                     Some(i) => tracing::info!(scene = self.scenes[i].name(), "scene changed"),
+                    None if active.is_some() => tracing::info!("inline notification showing"),
                     None => tracing::info!("no scene eligible, showing black"),
                 }
                 shown = Some(current);
@@ -339,7 +373,21 @@ impl RenderLoop {
                     scene_elapsed: a.elapsed,
                     frame,
                 };
-                self.scenes[a.index].render(&ctx, &snapshot, &mut canvas);
+                match &a.target {
+                    Target::Scene(i) => self.scenes[*i].render(&ctx, &snapshot, &mut canvas),
+                    Target::Inline { key, notice } => {
+                        if self.inline.as_ref().is_none_or(|(k, _)| k != key) {
+                            let scene =
+                                inline::scene(&self.notifications, self.width, self.height, notice);
+                            self.inline = Some((*key, scene));
+                        }
+                        if let Some((_, scene)) = &mut self.inline {
+                            scene.render(&ctx, &snapshot, &mut canvas);
+                        }
+                    }
+                }
+            } else {
+                self.inline = None;
             }
             // `send_replace` never blocks and works with no receivers.
             tx.send_replace(Arc::new(canvas));
@@ -438,6 +486,121 @@ mod tests {
     }
 
     #[test]
+    fn notifications_show_report_status_and_clear() {
+        use crate::color::Color;
+        use crate::control::Notification;
+        use embedded_graphics::pixelcolor::Rgb888;
+        use embedded_graphics::pixelcolor::RgbColor;
+
+        let cfg = Config::parse(
+            r##"
+            [canvas]
+            width = 64
+            height = 32
+            fps = 60
+            [[scene]]
+            name = "a"
+              [[scene.zone]]
+              rect = { x = 0, y = 0, w = 64, h = 32 }
+              background = "#0000ff"
+              widget = { type = "text", text = "" }
+            "##,
+        )
+        .unwrap();
+        let (control, link, _out) = crate::control::channel(vec!["a".into()]);
+        let (tx, mut frames) = frame_channel(64, 32);
+        let handle = RenderLoop::from_config(&cfg, None, Store::new())
+            .unwrap()
+            .with_control(link)
+            .spawn(tx)
+            .unwrap();
+        let mut status = control.subscribe();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let wait = |status: &mut watch::Receiver<Arc<Status>>, f: &dyn Fn(&Status) -> bool| {
+            rt.block_on(async {
+                tokio::time::timeout(Duration::from_secs(5), status.wait_for(|s| f(s)))
+                    .await
+                    .expect("status within 5 s")
+                    .unwrap();
+            })
+        };
+        let inline = |text: &str, priority, secs| Notification {
+            content: NotificationContent::Inline {
+                text: text.into(),
+                icon: None,
+                color: Color::WHITE,
+            },
+            duration: Duration::from_secs(secs),
+            priority,
+            repeat: 1,
+        };
+        wait(&mut status, &|s| s.scene.as_deref() == Some("a"));
+        let blue = Some(Rgb888::new(0, 0, 255));
+        rt.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while frames.borrow().pixel(1, 1) != blue {
+                    frames.changed().await.unwrap();
+                }
+            })
+            .await
+            .expect("the scene frame within 5 s");
+        });
+
+        control
+            .send(Command::Notify(inline("hello", 1, 600)))
+            .unwrap();
+        control
+            .send(Command::Notify(Notification {
+                content: NotificationContent::Scene("a".into()),
+                duration: Duration::from_secs(600),
+                priority: 0,
+                repeat: 2,
+            }))
+            .unwrap();
+        wait(&mut status, &|s| {
+            s.scene.is_none()
+                && s.notifications.len() == 2
+                && s.notifications[0].showing
+                && s.notifications[0].summary == "hello"
+                && s.notifications[1].summary == "scene:a"
+                && s.notifications[1].repeats_left == 2
+        });
+        // The inline notification is white text on black: the blue is gone
+        // and some white pixels were drawn.
+        rt.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let f = frames.borrow().clone();
+                    if f.pixel(1, 1) == Some(Rgb888::BLACK) && f.pixels().contains(&Rgb888::WHITE) {
+                        break;
+                    }
+                    frames.changed().await.unwrap();
+                }
+            })
+            .await
+            .expect("an inline frame within 5 s");
+        });
+
+        control.send(Command::ClearNotifications).unwrap();
+        wait(&mut status, &|s| {
+            s.notifications.is_empty() && s.scene.as_deref() == Some("a")
+        });
+        rt.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while frames.borrow().pixel(1, 1) != blue {
+                    frames.changed().await.unwrap();
+                }
+            })
+            .await
+            .expect("the scene is back within 5 s");
+        });
+        handle.stop();
+    }
+
+    #[test]
     fn produces_frames_and_stops() {
         let cfg = Config::parse(
             r##"
@@ -461,6 +624,8 @@ mod tests {
             fps: 60,
             scenes: vec![Scene::from_config(&cfg.scenes[0])],
             scheduler: Scheduler::from_config(&cfg, &[0]).unwrap(),
+            notifications: NotificationsConfig::default(),
+            inline: None,
             store: Store::new(),
             reload: None,
             control: None,
@@ -508,7 +673,7 @@ mod tests {
         let active = one
             .scheduler
             .tick(std::time::Instant::now(), &Store::new().snapshot());
-        assert_eq!(active.map(|a| a.index), Some(0));
+        assert_eq!(active.and_then(|a| a.index()), Some(0));
         let e = RenderLoop::from_config(&cfg, Some("nope"), Store::new())
             .err()
             .unwrap();

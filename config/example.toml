@@ -129,6 +129,12 @@ path = "../assets/fonts/spleen-32x64.bdf"
 name = "spleen-16x32"
 path = "../assets/fonts/spleen-16x32.bdf"
 
+# Inline notifications (text/icon alerts) are drawn full-screen. All optional.
+# [notifications]
+# font = "spleen-16x32"   # default: the largest built-in font that fits
+# font_scale = 1          # 1..=8; default: the largest scale that fits
+# background = "#000000"
+
 # Scenes rotate in the order listed below.
 [playlist]
 default_duration_s = 10   # for scenes without their own duration_s; > 0, max 86400

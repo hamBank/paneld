@@ -971,3 +971,32 @@ fn prometheus_source_defaults_and_validation() {
         assert!(e.contains(msg), "{msg}: {e}");
     }
 }
+
+#[test]
+fn notifications_config_defaults_parses_and_validates() {
+    let cfg = Config::parse(MINIMAL).unwrap();
+    assert_eq!(cfg.notifications.font, None);
+    assert_eq!(cfg.notifications.font_scale, None);
+    assert_eq!(cfg.notifications.background.to_string(), "#000000");
+
+    let cfg = Config::parse(&format!(
+        "[notifications]\nfont = \"9x15\"\nfont_scale = 2\nbackground = \"#101010\"\n{MINIMAL}"
+    ))
+    .unwrap();
+    assert_eq!(cfg.notifications.font.as_deref(), Some("9x15"));
+    assert_eq!(cfg.notifications.font_scale, Some(2));
+
+    let e = err(&format!(
+        "[notifications]\nfont = \"nope\"\nfont_scale = 9\n{MINIMAL}"
+    ));
+    assert!(
+        e.contains("notifications.font: unknown font \"nope\""),
+        "{e}"
+    );
+    assert!(
+        e.contains("notifications.font_scale: must be 1..=8 (got 9)"),
+        "{e}"
+    );
+    let e = err(&format!("[notifications]\nbogus = 1\n{MINIMAL}"));
+    assert!(e.contains("bogus"), "{e}");
+}
