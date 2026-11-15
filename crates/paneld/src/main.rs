@@ -373,6 +373,7 @@ fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
     paneld::sources::check_environment(&cfg)?;
     let api_settings =
         paneld::api::ApiSettings::from_config(&cfg.http).map_err(anyhow::Error::msg)?;
+    paneld::mqtt_ha::check_environment(&cfg)?;
     let (tx, rx) = frame_channel(cfg.canvas.width, cfg.canvas.height);
     let (reload_tx, reload_rx) = std::sync::mpsc::channel();
     let reload_ctx =
@@ -437,6 +438,18 @@ fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
                 store: store.clone(),
             }),
         );
+        // Home Assistant entities over MQTT (§7.2); off without `[mqtt]`.
+        let (ha_stop, ha_rx) = tokio::sync::watch::channel(false);
+        let ha_task = match &cfg.mqtt {
+            Some(m) => {
+                let card = paneld::mqtt_ha::CardMonitor::new(
+                    sinks.iter().map(|s| s.stats.clone()).collect(),
+                );
+                let ha = paneld::mqtt_ha::HaMqtt::new(m)?;
+                Some(tokio::spawn(ha.run(control.clone(), card, ha_rx)))
+            }
+            None => None,
+        };
         tracing::info!(addr = %cfg.http.bind, "http listening");
         if cfg.preview().is_some() {
             tracing::info!("preview at http://{}/preview", cfg.http.bind);
@@ -445,6 +458,10 @@ fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
             .with_graceful_shutdown(shutdown_signal())
             .await
             .context("http server");
+        let _ = ha_stop.send(true);
+        if let Some(task) = ha_task {
+            let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+        }
         sources
             .lock()
             .await

@@ -141,6 +141,9 @@ pub struct RestartOnly {
     /// `Debug` rendering of `[quiet_hours]` and `[auto_dim]` (the auto-dim
     /// task is started once).
     autodim: String,
+    /// `Debug` rendering of `[mqtt]` (the HA entity task is started once;
+    /// holds only the env var name, never the password).
+    mqtt: String,
 }
 
 impl RestartOnly {
@@ -152,6 +155,7 @@ impl RestartOnly {
             http_api: (cfg.http.token_env.clone(), cfg.http.data_prefix.clone()),
             outputs: format!("{:?}", cfg.outputs),
             autodim: format!("{:?}{:?}", cfg.quiet_hours, cfg.auto_dim),
+            mqtt: format!("{:?}", cfg.mqtt),
         }
     }
 
@@ -172,6 +176,9 @@ impl RestartOnly {
         }
         if self.autodim != new.autodim {
             v.push("[quiet_hours]/[auto_dim]");
+        }
+        if self.mqtt != new.mqtt {
+            v.push("[mqtt]");
         }
         v
     }

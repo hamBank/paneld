@@ -20,6 +20,7 @@ pub mod fonts;
 pub mod format;
 pub mod icons;
 pub mod media;
+pub mod mqtt_ha;
 pub mod png_io;
 pub mod postprocess;
 pub mod preview;
@@ -30,6 +31,8 @@ pub mod scheduler;
 pub mod sources;
 pub mod store;
 pub mod template;
+#[cfg(test)]
+mod test_broker;
 pub mod test_pattern;
 pub mod tls;
 pub mod widgets;
