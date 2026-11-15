@@ -203,7 +203,7 @@ sudo systemd-run --pty --wait --collect --quiet \
     -p DynamicUser=yes \
     -p AmbientCapabilities=CAP_NET_RAW -p CapabilityBoundingSet=CAP_NET_RAW \
     -p NoNewPrivileges=yes -p ProtectSystem=strict -p PrivateDevices=yes \
-    -p RestrictAddressFamilies="AF_UNIX AF_INET AF_INET6 AF_PACKET" \
+    -p RestrictAddressFamilies="AF_UNIX AF_INET AF_INET6 AF_PACKET AF_NETLINK" \
     -p SystemCallFilter=@system-service -p SystemCallArchitectures=native \
     /usr/local/bin/paneld probe --interface eth1
 ```

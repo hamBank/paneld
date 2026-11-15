@@ -129,11 +129,12 @@ RestrictSUIDSGID=yes
 # AF_INET/AF_INET6: HTTP/HTTPS, WebSocket, MQTT, the axum server.
 # AF_UNIX: syslog/journald logging and nss-systemd lookups of the dynamic user
 #          ("it is frequently used for local communication, including for syslog(2)").
-# AF_NETLINK is not listed on purpose: if_nametoindex() in glibc uses an ioctl on an
-# ordinary socket. NOT tested on a Pi: if DNS lookups or interface lookups fail
-# with "address family not supported", add AF_NETLINK here first.
+# AF_NETLINK: glibc's getaddrinfo() asks the kernel over netlink which address
+#             families are configured, to order its results. Blocking it risks
+#             failed or slow DNS for HA, MQTT and the HTTP sources. Read-only
+#             use; paneld never configures interfaces.
 # This only filters socket(2) [exec, RestrictAddressFamilies=].
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_PACKET
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_PACKET AF_NETLINK
 # Only the native ABI, so the filters above cannot be bypassed through another
 # one [exec, SystemCallArchitectures=: recommended together with the two filters].
 SystemCallArchitectures=native
