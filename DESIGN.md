@@ -543,7 +543,15 @@ Logging: `tracing` with env-filter; JSON output option for journald.
 - Raspberry Pi 4/5, Raspberry Pi OS Lite 64-bit. Onboard Ethernet → LAN; USB 3 Gigabit adapter → Colorlight card (or the reverse; config picks the interface). Wi-Fi for LAN is also fine.
 - The card-facing interface gets **no IP config** (disable DHCP on it in NetworkManager/dhcpcd) so the OS doesn't spam it.
 - Cross-compile with `cross` for `aarch64-unknown-linux-gnu`, or build on-device.
-- systemd unit (`deploy/paneld.service`): `DynamicUser=yes` or a dedicated user, `AmbientCapabilities=CAP_NET_RAW`, `CapabilityBoundingSet=CAP_NET_RAW`, `EnvironmentFile=/etc/paneld/env`, `Restart=on-failure`.
+- **systemd unit (as built, `deploy/paneld.service`; install guide in `deploy/README.md`):**
+  - `DynamicUser=yes`: paneld writes nothing to disk at runtime (config, fonts and images are only read; the store, route cache and HA series are in memory), so there is no state directory to own, and a config without secrets can be `0644`. A dedicated user would only be needed for persistent state.
+  - `AmbientCapabilities=CAP_NET_RAW` and `CapabilityBoundingSet=CAP_NET_RAW`, `NoNewPrivileges=yes`. HTTP binds a port above 1024, so no other capability is needed.
+  - `EnvironmentFile=-/etc/paneld/env` (`0600 root:root`, read by systemd): the only place for secrets; the config names variables (`token_env`, `password_env`, `header_env`, `bearer_env`). `deploy/env.example` lists them.
+  - Hardening that keeps the raw socket working: `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `PrivateDevices`, `ProtectKernel*`, `ProtectControlGroups`, `ProtectClock`, `ProtectHostname`, `RestrictNamespaces`, `LockPersonality`, `MemoryDenyWriteExecute`, `RestrictRealtime`, `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_PACKET`, `SystemCallArchitectures=native`, `SystemCallFilter=@system-service` (contains the `@network-io` and `@io-event` groups, which cover the `socket`/`bind`/`setsockopt`/`sendmmsg`/`poll`/`recvfrom` calls of `colorlight-net`). No `PrivateNetwork` (it would hide the NIC).
+  - `Restart=on-failure`, `RestartSec=5`, start limit 10 in 5 minutes (a config error should end as `failed`, not loop); `ExecReload=/bin/kill -HUP $MAINPID` (SIGHUP reloads the config, §7.3).
+  - `After=`/`Wants=network-online.target` for the LAN sources only. The card NIC has no IP config and the unit does not wait for it: the sink re-opens the socket with backoff (§4.2).
+  - The unit passes `systemd-analyze verify`; it has not yet been booted on a Pi (open: see `deploy/README.md`).
+- Card-facing NIC: an explicit NetworkManager profile with `ipv4.method disabled` and `ipv6.method disabled` (Bookworm and later use NetworkManager, not dhcpcd), see `deploy/README.md` section 2.
 - Card config (panel size/scan) done once in LEDVision from a Windows machine. Document the settings used in `deploy/README.md`.
 
 ---

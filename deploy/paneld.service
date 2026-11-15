@@ -1,0 +1,151 @@
+# paneld systemd unit (DESIGN.md section 11).
+#
+# Install: see deploy/README.md. Short version:
+#   sudo install -m 644 deploy/paneld.service /etc/systemd/system/paneld.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now paneld
+#
+# Every directive below was checked against the man pages of systemd (255
+# and the "latest" web version):
+#   [exec]     https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html
+#   [service]  https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html
+#   [unit]     https://www.freedesktop.org/software/systemd/man/latest/systemd.unit.html
+#   [special]  https://www.freedesktop.org/software/systemd/man/latest/systemd.special.html
+# Run `systemd-analyze verify /etc/systemd/system/paneld.service` after editing.
+
+[Unit]
+Description=paneld: LED panel daemon (Colorlight 5A-75B over raw Ethernet)
+Documentation=https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html
+# Home Assistant, MQTT and HTTP sources want the network [special, network-online.target:
+# "Units that strictly require a configured network connection should pull in
+# network-online.target (via Wants=) and order themselves after it"].
+# The card-facing NIC has no IP config, so it is NOT what this target waits for, and
+# paneld does not need it up at start: the Colorlight sink re-opens the raw socket
+# with backoff (1 s .. 10 s, DESIGN.md 4.2), and the sources reconnect on their own.
+# Without network-online the daemon would still start and recover, just with a few
+# warnings in the log, so this is for tidy logs and not a hard requirement.
+After=network-online.target
+Wants=network-online.target
+# A config or environment error exits non-zero at start. Restart=on-failure would
+# then loop forever; after 10 starts in 5 minutes systemd gives up and the unit
+# shows "failed" [unit, StartLimitIntervalSec=/StartLimitBurst=; clear with
+# `systemctl reset-failed paneld`].
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/paneld run --config /etc/paneld/config.toml
+# paneld reloads its config on SIGHUP (reload.rs). [service, ExecReload=: "kill -HUP
+# $MAINPID" is the documented example; $MAINPID is set for ExecReload.] The man page
+# notes the signal is asynchronous (no completion notice); that is fine here, the
+# result is in the journal.
+ExecReload=/bin/kill -HUP $MAINPID
+# The "-" makes a missing file non-fatal [exec, EnvironmentFile=: "optional, prefix
+# the path with -"]. Secrets live here, not in config.toml (CLAUDE.md). The file is
+# read by systemd (root) before dropping to the service user, so mode 600 root:root works.
+EnvironmentFile=-/etc/paneld/env
+# Log filter. paneld uses tracing's EnvFilter (RUST_LOG, default "info").
+#Environment=RUST_LOG=info,paneld=debug
+# JSON logs for journald: not available yet. Uncomment and adjust once the logging
+# change lands (DESIGN.md 10 mentions a JSON option).
+#Environment=PANELD_LOG_FORMAT=json   # placeholder name, not implemented
+
+# Restart only on a crash or non-zero exit, not after `systemctl stop`
+# [service, Restart=]. RestartSec: default is 100 ms, which would spin on a
+# permanent config error; 5 s keeps the journal readable [service, RestartSec=].
+Restart=on-failure
+RestartSec=5
+# paneld handles SIGTERM (graceful HTTP shutdown, MQTT "offline"). Do not wait the
+# default 90 s if it hangs [service, TimeoutStopSec=].
+TimeoutStopSec=15
+
+# --- Identity and privileges -------------------------------------------------
+# DynamicUser: a transient user/group per run, no useradd step, no files owned by
+# it to clean up (paneld writes nothing to disk at runtime: the config is only read,
+# the store and route cache live in memory). A dedicated user would only matter if
+# paneld needed a persistent state directory (it does not), or to read a
+# 0640 root:paneld config (the config holds no secrets, so 0644 is fine).
+# [exec, DynamicUser=] Implies ProtectSystem=strict, ProtectHome=read-only,
+# PrivateTmp, NoNewPrivileges, RestrictSUIDSGID and RemoveIPC (overridden/tightened below).
+DynamicUser=yes
+# Raw AF_PACKET sockets need CAP_NET_RAW, nothing else.
+# [exec, AmbientCapabilities=]: "Ambient capability sets are useful if you want to
+# execute a process as a non-privileged user but still want to give it some
+# capabilities" (keep-caps is added to SecureBits automatically). This is also the
+# case with DynamicUser=, which is just a non-privileged user.
+AmbientCapabilities=CAP_NET_RAW
+# Nothing else can ever be gained, even by an exploit [exec, CapabilityBoundingSet=].
+CapabilityBoundingSet=CAP_NET_RAW
+# No setuid/file-capability escalation [exec, NoNewPrivileges=]. (Implied by DynamicUser=.)
+# Ambient capabilities survive execve() for non-setuid binaries, so this does not
+# strip CAP_NET_RAW from the main process.
+NoNewPrivileges=yes
+
+# --- Filesystem --------------------------------------------------------------
+# Whole filesystem read-only except /dev, /proc, /sys [exec, ProtectSystem=strict].
+# paneld only reads /etc/paneld/* and the fonts/media next to it. (Implied by DynamicUser=.)
+ProtectSystem=strict
+# /home, /root and /run/user are empty and inaccessible [exec, ProtectHome=].
+ProtectHome=yes
+# Private /tmp and /var/tmp [exec, PrivateTmp=].
+PrivateTmp=yes
+# Minimal /dev (null, zero, random); also drops CAP_MKNOD/CAP_SYS_RAWIO and blocks
+# the @raw-io syscalls (ioperm, iopl). AF_PACKET is a network socket, not a device
+# node, and is unaffected [exec, PrivateDevices=].
+PrivateDevices=yes
+# Files created (there should be none) are private [exec, UMask=].
+UMask=0077
+
+# --- Kernel and system interfaces -------------------------------------------
+# /proc/sys, /sys etc. read-only [exec, ProtectKernelTunables=].
+ProtectKernelTunables=yes
+# No module loading [exec, ProtectKernelModules=].
+ProtectKernelModules=yes
+# No access to the kernel log ring buffer [exec, ProtectKernelLogs=].
+ProtectKernelLogs=yes
+# cgroup tree read-only [exec, ProtectControlGroups=].
+ProtectControlGroups=yes
+# No writes to the system clock [exec, ProtectClock=]. paneld only reads the time.
+ProtectClock=yes
+# Cannot change hostname [exec, ProtectHostname=].
+ProtectHostname=yes
+
+# --- Process restrictions ----------------------------------------------------
+# No namespaces (unshare/clone/setns) [exec, RestrictNamespaces=].
+RestrictNamespaces=yes
+# No personality() changes [exec, LockPersonality=].
+LockPersonality=yes
+# No W+X mappings [exec, MemoryDenyWriteExecute=]. Rust has no JIT, and rustls/ring and tokio
+# are not known to need executable memory (not yet run on a Pi). If a future dependency (a scripting
+# or video decoder) needs it, remove this line first when debugging a SIGSEGV/EPERM.
+MemoryDenyWriteExecute=yes
+# No SCHED_FIFO/RR [exec, RestrictRealtime=]. paneld does not set a scheduling
+# policy (grep'd: no sched_* calls); the render loop is an ordinary thread.
+RestrictRealtime=yes
+# No setuid/setgid files [exec, RestrictSUIDSGID=]. (Implied by DynamicUser=.)
+RestrictSUIDSGID=yes
+# AF_PACKET: the Colorlight raw socket (colorlight-net/src/linux.rs calls
+#            socket(AF_PACKET, SOCK_RAW, ...)).
+# AF_INET/AF_INET6: HTTP/HTTPS, WebSocket, MQTT, the axum server.
+# AF_UNIX: syslog/journald logging and nss-systemd lookups of the dynamic user
+#          ("it is frequently used for local communication, including for syslog(2)").
+# AF_NETLINK is not listed on purpose: if_nametoindex() in glibc uses an ioctl on an
+# ordinary socket. NOT tested on a Pi: if DNS lookups or interface lookups fail
+# with "address family not supported", add AF_NETLINK here first.
+# This only filters socket(2) [exec, RestrictAddressFamilies=].
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_PACKET
+# Only the native ABI, so the filters above cannot be bypassed through another
+# one [exec, SystemCallArchitectures=: recommended together with the two filters].
+SystemCallArchitectures=native
+# Allow-list of "common system service" syscalls [exec, SystemCallFilter=].
+# `systemd-analyze syscall-filter @system-service` (systemd 255) includes
+# @network-io (socket, bind, setsockopt, sendmmsg, recvfrom, ...) and @io-event
+# (poll, epoll_*), which are the calls the raw socket code uses (socket, bind,
+# setsockopt, sendmmsg, poll, recv) plus ioctl via if_nametoindex. A denied call
+# kills the process with SIGSYS, visible as "code=killed, status=31/SYS".
+# (@system-service already leaves out @privileged, @clock, @mount, @swap, @reboot.)
+SystemCallFilter=@system-service
+
+[Install]
+# [unit, WantedBy= in [Install]] start at boot in normal multi-user mode.
+WantedBy=multi-user.target
