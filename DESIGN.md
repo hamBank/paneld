@@ -151,6 +151,13 @@ Applied per sink (so the preview can show "true" colours while the panel gets co
 - All of the above are combined into one 256-entry LUT per channel (`postprocess.rs`; order: gamma, white point, brightness, one rounding)
 - Auto-dim: schedule-based (sunset/sunrise, quiet hours) or driven by a HA lux sensor entity
 
+**As built (M4, `autodim.rs`, `colorlight_sink.rs`):**
+- **Sinks follow `OutputLevel` live.** Each colorlight sink holds a `watch::Receiver<OutputLevel>` and reads it once per frame (it also wakes on a level change, so a dim change shows without waiting for a new frame). `BrightnessPlan::apply` turns the level into the sink's settings: hardware mode puts `level.scale(brightness)` into both the `0x0A` and `0x01` frames and leaves the LUT at gamma and white point; software mode keeps the card at 255 and rebuilds the LUT with that brightness (only when the level changes, never per frame). Off means black pixels and card brightness 0 in both modes; frames keep being sent so the card never shows a stale image. The preview stays true colour: it shows content, not brightness.
+- **Auto-dim task** (`autodim::run`) evaluates every 30 s (every 5 s when a lux sensor is configured; the store has no change notification, so polling the snapshot is the cheap option) and sends `Command::SetDim` only when the value changes. Local time is `chrono::Local`; the logic takes the time as an argument so tests inject it. Config changes need a restart.
+- **Inputs** (`[quiet_hours]`, `[auto_dim.sun]`, `[auto_dim.lux]`, see section 8): quiet hours give a fixed dim level inside a window that may wrap midnight; sun gives 255 by day and `night` after dusk with a linear ramp of `ramp_min` after sunset and before sunrise (polar day: 255, polar night: `night`); lux maps a store value through a piecewise-linear curve and is ignored when missing or older than `stale_after_s`.
+- **Combination:** the dim level is the minimum of the inputs that apply (255 if none), so a stale or missing lux sensor falls back to the schedule inputs.
+- **Sun times** are NOAA's general solar position equations (fractional year, equation of time, declination, hour angle for zenith 90.833 degrees; <https://gml.noaa.gov/grad/solcalc/solareqns.PDF>, from Meeus, *Astronomical Algorithms*), evaluated at the event time with one refinement pass. Tests check Greenwich and Sydney Observatory against US Naval Observatory data to within 2 minutes.
+
 ### 5.3 Data store
 - Map of `Key → Value` where `Value` is an enum: `Number(f64, unit)`, `Text`, `Bool`, `Image(Arc<Bitmap>)`, `Series(Arc<[(SystemTime, f64)]>)` (immutable, so a per-frame clone is one refcount bump; sources append with `StoreWriter::push_point`), `Json`.
 - `Bitmap` (`media.rs`) is our own small straight-alpha RGBA8 type instead of the `image` crate's `RgbaImage`: the `image` crate pulls in a large codec tree, and we only need PNG (the `png` crate we already use) and GIF (the `gif` crate). Widgets detect a new image by `Arc::ptr_eq`.
@@ -466,7 +473,17 @@ condition = "prom:house_power > 0"
 [quiet_hours]
 start = "22:00"
 end = "06:30"
-brightness = 20
+brightness = 20          # dim level 0-255 inside the window (wraps midnight)
+
+# Optional, see section 5.2:
+# [auto_dim.sun]
+# location = { lat = 51.4769, lon = -0.0005 }
+# night = 40
+# ramp_min = 30
+# [auto_dim.lux]
+# key = "ha:sensor.lux"
+# curve = [[0, 20], [50, 120], [400, 255]]
+# stale_after_s = 600
 ```
 
 Secrets only via env vars (`*_env` keys). Never commit tokens.

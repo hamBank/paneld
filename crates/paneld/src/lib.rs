@@ -6,6 +6,7 @@
 //! HTTP preview sink.
 
 pub mod api;
+pub mod autodim;
 pub mod bdf;
 pub mod canvas;
 pub mod color;

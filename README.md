@@ -18,7 +18,7 @@ Architecture, config schema and roadmap are in [`DESIGN.md`](DESIGN.md).
 
 **M3 (data) is done:** data sources (`static`, `aircraft` via adsb.fi, `home_assistant`, `mqtt` (plain TCP), `http_poll`, `prometheus`) run under a supervisor and restart on failure. Hot reload restarts only the sources whose config changed. Text widgets take templates like `{ha:sensor.x:.1}°C`, and `value` widgets can map weather conditions to icons.
 
-Next: control API, MQTT discovery, notifications and quiet hours (M4). See `DESIGN.md` §14.
+Next: control API, MQTT discovery and notifications (M4); quiet hours and auto-dim are in. See `DESIGN.md` §14.
 
 ## Hardware
 
@@ -222,12 +222,45 @@ curl -H "$A" -d '{"on":false}' $H/api/power                                     
 
 `POST /api/data/{key}` writes into the store under the source name `http`. Keys must be `<data_prefix>:<name>` (`[http] data_prefix`, default `push`; name: letters, digits, `_ . -`, at most 128). Config validation rejects a `data_prefix` that any source uses (source names, `ha`, or the prefix of an explicitly configured key), so pushes cannot collide with source data; a push also never overwrites a key another source wrote (409). At most 1000 pushed keys. Use them in scenes like any key: `{push:power:.0}`. Numeric strings become numbers; arrays and objects are rejected.
 
+### Brightness, quiet hours and auto-dim
+
+The panel's brightness is three numbers multiplied together:
+
+```
+card brightness = configured brightness (per output) x user brightness x auto-dim / 255 / 255
+```
+
+- **Configured** `brightness` on a `[[output]]` is that panel's calibrated maximum.
+- **User brightness** and on/off come from the control plane (HTTP API, Home Assistant). Off sends black with card brightness 0 (frames keep flowing).
+- **Auto-dim** (0-255, 255 = none) comes from the config below.
+
+With `brightness_mode = "hardware"` the result goes into the card's frames; with `"software"` the colour LUT is rebuilt when it changes. The preview always shows content in true colour, not the dimmed output.
+
+```toml
+[quiet_hours]                    # local time; the window may wrap midnight
+start = "22:00"
+end = "06:30"
+brightness = 20                  # dim level 0-255 inside the window
+
+# [auto_dim.sun]                 # dim after dusk, ramping over ramp_min minutes
+# location = { lat = 51.4769, lon = -0.0005 }   # Royal Observatory, Greenwich
+# night = 40
+# ramp_min = 30
+
+# [auto_dim.lux]                 # dim from a light sensor in the store
+# key = "ha:sensor.lux"
+# curve = [[0, 20], [50, 120], [400, 255]]       # [lux, dim], linear in between
+# stale_after_s = 600            # older readings are ignored
+```
+
+The dim level is the **minimum** of whatever is configured, so a stale or missing lux reading falls back to the schedule. It is re-evaluated every 30 s (5 s with a lux sensor) and only sent when it changes. Sunrise and sunset use NOAA's solar equations; at polar latitudes the sun may not rise (`night`) or set (no dimming). These settings need a restart.
+
 ### Live reload
 
 `paneld run` picks up edits to the config file without a restart. The file is polled once a second; a change is applied once the file has had the same new content on two consecutive polls (so a half-written save is not parsed, and touching the file without changing it does nothing), which means a reload takes about two seconds. On unix, `kill -HUP <pid>` reloads immediately. Editors that save in place or by rename-and-replace both work. The new config is fully parsed, validated and prepared (including decoding images) off the render thread, then swapped in between two frames; the playlist restarts at its first eligible scene and widget state (scroll position, GIF frame) starts over.
 
 - **Applied live:** scenes, zones, widgets, conditions, the playlist and `duration_s`, and `[sources]`. Only the sources whose config changed are restarted; the others keep running. Adding, removing or editing a `[sources.<name>]` table acts on that source alone, and so does a scene edit that makes it read different entities (for Home Assistant: a scene that starts showing a new `ha:` entity restarts the Home Assistant source). A removed source's values are cleared. A restarted source's values stay on screen until it writes again; keys it no longer produces are then removed. If a changed or added source needs an environment variable that is not set (a token), it is not started, the old one keeps running, and the reload counts an error; the scene changes still apply.
-- **Needs a restart:** `canvas.fps`, `[http]`, and every `[[output]]` (the preview and the Colorlight settings gamma, brightness, white point, colour order, sync gap and interface). If these differ from the running values, a warning names them and the scene and playlist changes are still applied.
+- **Needs a restart:** `canvas.fps`, `[http]`, `[quiet_hours]`, `[auto_dim]`, and every `[[output]]` (the preview and the Colorlight settings gamma, brightness, white point, colour order, sync gap and interface). If these differ from the running values, a warning names them and the scene and playlist changes are still applied.
 - **Rejected:** a changed `canvas` width or height, since scenes laid out for a new size would not fit the running canvas. Restart to resize.
 - **Errors never take the panel down.** A parse or validation error, an unreadable image, a canvas size change, or (with `run --scene X`) a config that no longer has scene `X` is logged with the full message, counted in `reload_errors`, and the old config keeps running. Fix the file and the next change is picked up. With `--scene X`, scene `X` stays on screen across reloads.
 - **Limitations:** image files referenced by the config are not watched; after replacing one, make any edit to the config or send SIGHUP.

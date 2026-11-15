@@ -138,6 +138,9 @@ pub struct RestartOnly {
     /// Colorlight sinks, including gamma, brightness and colour order) are
     /// set up once at start-up.
     outputs: String,
+    /// `Debug` rendering of `[quiet_hours]` and `[auto_dim]` (the auto-dim
+    /// task is started once).
+    autodim: String,
 }
 
 impl RestartOnly {
@@ -148,6 +151,7 @@ impl RestartOnly {
             http_bind: cfg.http.bind,
             http_api: (cfg.http.token_env.clone(), cfg.http.data_prefix.clone()),
             outputs: format!("{:?}", cfg.outputs),
+            autodim: format!("{:?}{:?}", cfg.quiet_hours, cfg.auto_dim),
         }
     }
 
@@ -165,6 +169,9 @@ impl RestartOnly {
         }
         if self.outputs != new.outputs {
             v.push("[[output]]");
+        }
+        if self.autodim != new.autodim {
+            v.push("[quiet_hours]/[auto_dim]");
         }
         v
     }

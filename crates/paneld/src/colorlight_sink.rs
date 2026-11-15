@@ -30,9 +30,10 @@ use colorlight_proto::{
 use tokio::sync::watch;
 
 use crate::canvas::Canvas;
-use crate::config::{ColorOrder, ColorlightOutput};
+use crate::config::{BrightnessMode, ColorOrder, ColorlightOutput};
+use crate::control::OutputLevel;
 use crate::engine::FrameReceiver;
-use crate::postprocess::PostProcess;
+use crate::postprocess::{PostProcess, PostProcessParams};
 
 /// How long discovery waits for an answer to each request (FPP uses 300 ms).
 pub const DISCOVERY_TIMEOUT: Duration = Duration::from_millis(300);
@@ -46,10 +47,9 @@ const REOPEN_AFTER_FAILURES: u32 = 3;
 #[derive(Debug, Clone)]
 pub struct SinkSettings {
     pub interface: String,
-    pub post: PostProcess,
+    /// How the output level turns into LUT and card brightness.
+    pub plan: BrightnessPlan,
     pub color_order: ColorOrder,
-    /// Brightness byte for both the `0x0A` and the `0x01` frame.
-    pub brightness: u8,
     pub sync_gap: Duration,
     /// Firmware major version override; `None` = use discovery.
     pub firmware_major: Option<u8>,
@@ -63,13 +63,71 @@ impl SinkSettings {
     pub fn from_output(o: &ColorlightOutput, canvas_w: u32, canvas_h: u32) -> Self {
         SinkSettings {
             interface: o.interface.clone(),
-            post: PostProcess::from_output(o),
+            plan: BrightnessPlan::from_output(o),
             color_order: o.color_order,
-            brightness: o.card_brightness(),
             sync_gap: Duration::from_micros(u64::from(o.sync_gap_us)),
             firmware_major: o.firmware_major,
             canvas: (canvas_w, canvas_h),
             reconnect_backoff: (Duration::from_secs(1), Duration::from_secs(10)),
+        }
+    }
+}
+
+/// What a sink applies for one [`OutputLevel`].
+#[derive(Debug, Clone)]
+pub struct Applied {
+    /// Gamma / white point (and, in software mode, brightness) LUT.
+    pub post: PostProcess,
+    /// Brightness byte for both the `0x0A` and the `0x01` frame.
+    pub card_brightness: u8,
+    /// Send black pixels instead of the canvas.
+    pub blank: bool,
+}
+
+/// How an output's configured `brightness` (its maximum) follows the live
+/// [`OutputLevel`] (DESIGN.md section 5.2 and 7):
+///
+/// - hardware mode: the card brightness byte is `level.scale(configured)`;
+///   the LUT stays at gamma and white point only.
+/// - software mode: the card byte stays 255 and the LUT is rebuilt with
+///   brightness `level.scale(configured)`.
+/// - off: black pixels and card brightness 0 in both modes. Frames keep
+///   flowing, so the card never holds a stale image.
+///
+/// The preview is not affected: it shows content in true colour.
+#[derive(Debug, Clone, Copy)]
+pub struct BrightnessPlan {
+    pub mode: BrightnessMode,
+    /// The output's configured (maximum) brightness.
+    pub configured: u8,
+    pub gamma: f32,
+    pub white_point: crate::color::Color,
+}
+
+impl BrightnessPlan {
+    pub fn from_output(o: &ColorlightOutput) -> Self {
+        BrightnessPlan {
+            mode: o.brightness_mode,
+            configured: o.brightness,
+            gamma: o.gamma,
+            white_point: o.white_point,
+        }
+    }
+
+    pub fn apply(&self, level: OutputLevel) -> Applied {
+        let b = level.scale(self.configured);
+        let (lut_brightness, card_brightness) = match self.mode {
+            BrightnessMode::Hardware => (255, b),
+            BrightnessMode::Software => (b, if level.on { 255 } else { 0 }),
+        };
+        Applied {
+            post: PostProcess::new(PostProcessParams {
+                gamma: self.gamma,
+                white_point: self.white_point,
+                brightness: lut_brightness,
+            }),
+            card_brightness,
+            blank: !level.on,
         }
     }
 }
@@ -111,6 +169,7 @@ pub struct FrameSender {
     post: PostProcess,
     color_order: ColorOrder,
     brightness: u8,
+    blank: bool,
     sync_gap: Duration,
     double_sync: bool,
     /// Corrected, reordered pixels of the current frame.
@@ -133,12 +192,20 @@ impl FrameSender {
             post,
             color_order,
             brightness,
+            blank: false,
             sync_gap,
             double_sync,
             pixels: Vec::new(),
             wire: Vec::new(),
             spans: Vec::new(),
         }
+    }
+
+    /// Switch to a new brightness result (call when the level changes).
+    pub fn set_applied(&mut self, a: Applied) {
+        self.post = a.post;
+        self.brightness = a.card_brightness;
+        self.blank = a.blank;
     }
 
     pub fn double_sync(&self) -> bool {
@@ -161,7 +228,12 @@ impl FrameSender {
             "canvas {w}x{h} does not fit the Colorlight protocol (max 65536 per side)"
         );
         // Preparing the packets is not part of the send time.
-        self.post.apply_into(canvas, &mut self.pixels);
+        if self.blank {
+            self.pixels.clear();
+            self.pixels.resize(w * h * 3, 0);
+        } else {
+            self.post.apply_into(canvas, &mut self.pixels);
+        }
         self.color_order.reorder_in_place(&mut self.pixels);
 
         self.wire.clear();
@@ -247,8 +319,12 @@ impl SinkHandle {
 }
 
 /// Start a sink on a real raw socket.
-pub fn spawn(settings: SinkSettings, rx: FrameReceiver) -> std::io::Result<SinkHandle> {
-    spawn_with(settings, rx, RawLink::open)
+pub fn spawn(
+    settings: SinkSettings,
+    rx: FrameReceiver,
+    levels: watch::Receiver<OutputLevel>,
+) -> std::io::Result<SinkHandle> {
+    spawn_with(settings, rx, levels, RawLink::open)
 }
 
 /// Start a sink that gets its link from `open`, which is called again (with
@@ -256,6 +332,7 @@ pub fn spawn(settings: SinkSettings, rx: FrameReceiver) -> std::io::Result<SinkH
 pub fn spawn_with<L, F>(
     settings: SinkSettings,
     rx: FrameReceiver,
+    levels: watch::Receiver<OutputLevel>,
     open: F,
 ) -> std::io::Result<SinkHandle>
 where
@@ -268,7 +345,7 @@ where
         .name("colorlight".into())
         .spawn({
             let stats = stats.clone();
-            move || run(settings, rx, stop_rx, open, &stats)
+            move || run(settings, rx, levels, stop_rx, open, &stats)
         })?;
     Ok(SinkHandle {
         stop: stop_tx,
@@ -280,6 +357,7 @@ where
 fn run<L, F>(
     settings: SinkSettings,
     mut rx: FrameReceiver,
+    mut levels: watch::Receiver<OutputLevel>,
     mut stop: watch::Receiver<bool>,
     mut open: F,
     stats: &SinkStats,
@@ -309,13 +387,17 @@ fn run<L, F>(
     };
 
     let iface = settings.interface.as_str();
+    let mut current = *levels.borrow_and_update();
+    let first = settings.plan.apply(current);
     let mut sender = FrameSender::new(
-        settings.post.clone(),
+        first.post.clone(),
         settings.color_order,
-        settings.brightness,
+        first.card_brightness,
         settings.sync_gap,
         false,
     );
+    sender.set_applied(first);
+    let mut levels_open = true;
     let mut configured = false;
     let mut backoff = settings.reconnect_backoff.0;
     let mut open_log = RateLimit::new(Duration::from_secs(30));
@@ -364,11 +446,28 @@ fn run<L, F>(
             let got = rt.block_on(async {
                 tokio::select! {
                     r = rx.changed() => r.is_ok(),
+                    // A level change re-sends the current canvas. If the
+                    // control plane is gone the level just stays put.
+                    r = levels.changed(), if levels_open => {
+                        levels_open = r.is_ok();
+                        true
+                    }
                     _ = stop.wait_for(|s| *s) => false,
                 }
             });
             if !got {
                 return;
+            }
+            // Read the level once per frame; rebuild the LUT only on change.
+            let level = *levels.borrow_and_update();
+            if level != current {
+                current = level;
+                sender.set_applied(settings.plan.apply(level));
+                tracing::debug!(
+                    on = level.on,
+                    level = level.level,
+                    "colorlight: output level"
+                );
             }
             let canvas = rx.borrow_and_update().clone();
             match sender.send(&mut link, &canvas) {
@@ -468,7 +567,6 @@ fn startup_discovery<L: Link>(link: &mut L, s: &SinkSettings) -> Result<bool, Li
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::postprocess::PostProcessParams;
     use colorlight_net::mock::{Event, MockLink};
     use colorlight_proto::{encode_row_header, MAX_PIXELS_PER_PACKET};
     use embedded_graphics::pixelcolor::Rgb888;
@@ -584,15 +682,76 @@ mod tests {
             ))
             .unwrap()
         };
-        for (mode, byte) in [("hardware", 180), ("software", 255)] {
+        for (mode, byte) in [("hardware", 180u8), ("software", 255)] {
             let cfg = cfg(mode);
             let crate::config::OutputConfig::Colorlight(o) = &cfg.outputs[0] else {
                 unreachable!()
             };
             let s = SinkSettings::from_output(o, 4, 2);
-            assert_eq!(s.brightness, byte, "{mode}");
+            let a = s.plan.apply(OutputLevel::FULL);
+            assert_eq!(a.card_brightness, byte, "{mode}");
             assert_eq!(s.color_order, ColorOrder::Bgr);
             assert_eq!(s.sync_gap, Duration::from_micros(700));
+        }
+    }
+
+    fn plan(mode: BrightnessMode, configured: u8) -> BrightnessPlan {
+        BrightnessPlan {
+            mode,
+            configured,
+            gamma: 1.0,
+            white_point: crate::color::Color::WHITE,
+        }
+    }
+
+    /// Send a solid mid-grey 1x1 frame; return the card brightness bytes
+    /// of the 0x0A and 0x01 frames and the first pixel byte.
+    fn send_at(p: &BrightnessPlan, level: OutputLevel) -> (u8, u8, u8) {
+        let mut s = sender(ColorOrder::Rgb, 0, false);
+        s.set_applied(p.apply(level));
+        let mut cv = Canvas::new(1, 1);
+        cv.fill(Rgb888::new(200, 200, 200));
+        let mut link = MockLink::new();
+        s.send(&mut link, &cv).unwrap();
+        let frames = link.frames();
+        let row = frames.iter().find(|f| f[12] == 0x55).unwrap();
+        let (b, d) = (frames[0], frames[frames.len() - 1]);
+        (b[13], d[35], row[ROW_HEADER_LEN])
+    }
+
+    #[test]
+    fn hardware_mode_scales_the_card_brightness_with_the_level() {
+        let p = plan(BrightnessMode::Hardware, 200);
+        for (level, card) in [(255u8, 200u8), (128, 100), (64, 50), (0, 0)] {
+            let lv = OutputLevel::from_parts(true, level, 255);
+            let (b, d, px) = send_at(&p, lv);
+            assert_eq!((b, d), (card, card), "level {level}");
+            assert_eq!(px, 200, "pixels untouched in hardware mode");
+        }
+    }
+
+    #[test]
+    fn software_mode_scales_the_pixels_and_keeps_the_card_at_full() {
+        let p = plan(BrightnessMode::Software, 200);
+        for (level, px) in [(255u8, 157u8), (128, 78), (0, 0)] {
+            let lv = OutputLevel::from_parts(true, level, 255);
+            let (b, d, got) = send_at(&p, lv);
+            assert_eq!((b, d), (255, 255), "level {level}");
+            // 200 * (configured * level / 255) / 255, within rounding.
+            let want = (200.0 * f64::from(lv.scale(200)) / 255.0).round() as u8;
+            assert_eq!(got, want, "level {level}");
+            assert!(got.abs_diff(px) <= 1, "level {level}: {got} vs ~{px}");
+        }
+    }
+
+    #[test]
+    fn off_sends_black_with_brightness_zero_in_both_modes() {
+        for mode in [BrightnessMode::Hardware, BrightnessMode::Software] {
+            let off = OutputLevel {
+                on: false,
+                level: 255,
+            };
+            assert_eq!(send_at(&plan(mode, 200), off), (0, 0, 0), "{mode:?}");
         }
     }
 
@@ -768,15 +927,20 @@ mod tests {
         };
         let settings = SinkSettings {
             interface: "eth9".into(),
-            post: PostProcess::new(PostProcessParams::default()),
+            plan: BrightnessPlan {
+                mode: BrightnessMode::Hardware,
+                configured: 77,
+                gamma: 1.0,
+                white_point: crate::color::Color::WHITE,
+            },
             color_order: ColorOrder::Rgb,
-            brightness: 77,
             sync_gap: Duration::ZERO,
             firmware_major: Some(13),
             canvas: (4, 2),
             reconnect_backoff: (Duration::from_millis(5), Duration::from_millis(20)),
         };
-        let handle = spawn_with(settings, rx, open).unwrap();
+        let (_level_tx, level_rx) = watch::channel(OutputLevel::FULL);
+        let handle = spawn_with(settings, rx, level_rx, open).unwrap();
 
         // Keep publishing frames until `done` holds (latest frame wins, so a
         // single send could be skipped).

@@ -42,6 +42,12 @@ pub struct Config {
     pub http: HttpConfig,
     #[serde(default)]
     pub playlist: PlaylistConfig,
+    /// Dim level during a daily window (DESIGN.md §5.2).
+    #[serde(default)]
+    pub quiet_hours: Option<crate::autodim::QuietHoursConfig>,
+    /// Sun- and lux-driven auto-dim (DESIGN.md §5.2).
+    #[serde(default)]
+    pub auto_dim: Option<crate::autodim::AutoDimConfig>,
     /// BDF fonts, usable by name from any text, clock or value widget.
     #[serde(default, rename = "font")]
     pub fonts: Vec<FontConfig>,
@@ -1175,6 +1181,11 @@ impl Config {
         if !(1..=MAX_FPS).contains(&c.fps) {
             errs.push(format!("canvas.fps: must be 1..={MAX_FPS} (got {})", c.fps));
         }
+
+        errs.extend(crate::autodim::validate(
+            self.quiet_hours.as_ref(),
+            self.auto_dim.as_ref(),
+        ));
 
         let mut previews = 0;
         let mut interfaces: Vec<(&str, usize)> = Vec::new();
