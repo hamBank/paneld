@@ -29,6 +29,8 @@ use colorlight_proto::{
 };
 use tokio::sync::watch;
 
+use crate::metrics::{Histogram, SEND_BUCKETS};
+
 use crate::canvas::Canvas;
 use crate::config::{BrightnessMode, ColorOrder, ColorlightOutput};
 use crate::control::OutputLevel;
@@ -133,7 +135,7 @@ impl BrightnessPlan {
 }
 
 /// Counters, shared with the rest of the daemon (exported in M5).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SinkStats {
     pub frames_sent: AtomicU64,
     /// Frames that failed to send.
@@ -143,15 +145,32 @@ pub struct SinkStats {
     pub last_send_us: AtomicU64,
     pub max_send_us: AtomicU64,
     pub total_send_us: AtomicU64,
+    /// Send time per frame, for `/metrics`.
+    pub send_duration: Histogram,
+}
+
+impl Default for SinkStats {
+    fn default() -> Self {
+        SinkStats {
+            frames_sent: AtomicU64::new(0),
+            send_errors: AtomicU64::new(0),
+            opens: AtomicU64::new(0),
+            last_send_us: AtomicU64::new(0),
+            max_send_us: AtomicU64::new(0),
+            total_send_us: AtomicU64::new(0),
+            send_duration: Histogram::new(SEND_BUCKETS),
+        }
+    }
 }
 
 impl SinkStats {
-    fn record(&self, d: Duration) {
+    pub(crate) fn record(&self, d: Duration) {
         let us = d.as_micros() as u64;
         self.frames_sent.fetch_add(1, Ordering::Relaxed);
         self.last_send_us.store(us, Ordering::Relaxed);
         self.max_send_us.fetch_max(us, Ordering::Relaxed);
         self.total_send_us.fetch_add(us, Ordering::Relaxed);
+        self.send_duration.observe(d);
     }
 
     /// Mean time to send a frame, in µs (0 before the first frame).
@@ -304,6 +323,8 @@ pub struct SinkHandle {
     stop: watch::Sender<bool>,
     thread: Option<JoinHandle<()>>,
     pub stats: Arc<SinkStats>,
+    /// Network interface this sink sends on (the `sink` metric label).
+    pub interface: String,
 }
 
 impl SinkHandle {
@@ -341,6 +362,7 @@ where
 {
     let (stop_tx, stop_rx) = watch::channel(false);
     let stats = Arc::new(SinkStats::default());
+    let interface = settings.interface.clone();
     let thread = std::thread::Builder::new()
         .name("colorlight".into())
         .spawn({
@@ -351,6 +373,7 @@ where
         stop: stop_tx,
         thread: Some(thread),
         stats,
+        interface,
     })
 }
 

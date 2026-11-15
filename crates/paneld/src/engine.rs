@@ -18,6 +18,7 @@ use crate::canvas::Canvas;
 use crate::config::{Config, NotificationsConfig};
 use crate::control::{Command, ControlLink, NotificationContent, OutputLevel, Status};
 use crate::inline;
+use crate::metrics::{Histogram, RENDER_BUCKETS};
 use crate::scene::Scene;
 use crate::scheduler::{Scheduler, Target};
 use crate::store::Store;
@@ -26,11 +27,24 @@ use crate::widgets::FrameCtx;
 pub type FrameSender = watch::Sender<Arc<Canvas>>;
 pub type FrameReceiver = watch::Receiver<Arc<Canvas>>;
 
-/// Counters shared with the rest of the daemon (exported as metrics in M5).
-#[derive(Debug, Default)]
+/// Counters shared with the rest of the daemon (exported at `/metrics`).
+#[derive(Debug)]
 pub struct RenderStats {
     pub frames_rendered: AtomicU64,
     pub frames_skipped: AtomicU64,
+    /// Time to build one frame: scheduling, widget rendering and publishing,
+    /// but not the wait for the next tick.
+    pub render_duration: Histogram,
+}
+
+impl Default for RenderStats {
+    fn default() -> Self {
+        RenderStats {
+            frames_rendered: AtomicU64::new(0),
+            frames_skipped: AtomicU64::new(0),
+            render_duration: Histogram::new(RENDER_BUCKETS),
+        }
+    }
 }
 
 /// Everything a config reload replaces: the scenes (with prepared widgets)
@@ -339,6 +353,7 @@ impl RenderLoop {
                 std::thread::sleep(next - now);
             }
 
+            let frame_start = Instant::now();
             if self.apply_reload() {
                 // Log the first scene of the new playlist even if its index
                 // and name match the old one.
@@ -393,6 +408,7 @@ impl RenderLoop {
             tx.send_replace(Arc::new(canvas));
             frame += 1;
             stats.frames_rendered.fetch_add(1, Ordering::Relaxed);
+            stats.render_duration.observe(frame_start.elapsed());
 
             next += period;
             let now = Instant::now();

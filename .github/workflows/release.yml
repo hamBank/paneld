@@ -1,0 +1,85 @@
+name: Release build
+
+# Builds the Raspberry Pi (aarch64, glibc) binary. Not run on PRs: the
+# check-pi job in ci.yml already proves the target compiles there.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  TARGET: aarch64-unknown-linux-gnu
+  ARTIFACT: paneld-aarch64-unknown-linux-gnu
+  # Raspberry Pi OS 12 (Bookworm) ships glibc 2.36. The build fails if the
+  # binary ever needs a newer one (e.g. a runner image with a newer sysroot).
+  MAX_GLIBC: "2.36"
+
+jobs:
+  build-pi:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.TARGET }}
+      - name: Tag matches the crate version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          crate=$(cargo metadata --no-deps --format-version 1 --locked \
+            | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "paneld"))')
+          if [ "${GITHUB_REF_NAME}" != "v${crate}" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match paneld version ${crate}" >&2
+            exit 1
+          fi
+      - uses: Swatinem/rust-cache@v2
+      # ring (TLS) compiles C for the target, so a cross C compiler is needed;
+      # .cargo/config.toml points the linker at aarch64-linux-gnu-gcc.
+      - run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+      - run: cargo build --release --locked --target ${{ env.TARGET }} -p paneld
+      - name: Check the binary
+        run: |
+          bin=target/${TARGET}/release/paneld
+          file "$bin"
+          file "$bin" | grep -q 'ARM aarch64'
+          aarch64-linux-gnu-readelf -d "$bin" | grep NEEDED
+          need=$(aarch64-linux-gnu-readelf -V "$bin" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -n1)
+          echo "needs glibc ${need} (max allowed ${MAX_GLIBC})"
+          [ "$(printf '%s\n%s\n' "$need" "$MAX_GLIBC" | sort -V | tail -n1)" = "$MAX_GLIBC" ]
+      - name: Package
+        run: |
+          mkdir dist
+          cp "target/${TARGET}/release/paneld" "dist/${ARTIFACT}"
+          cd dist
+          sha256sum "${ARTIFACT}" > "${ARTIFACT}.sha256"
+          cat "${ARTIFACT}.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: dist/*
+          if-no-files-found: error
+
+  # The only job with write access: attaches the binary to the GitHub release
+  # for a v* tag.
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-pi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: paneld-aarch64-unknown-linux-gnu
+          path: dist
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          files: dist/*
+          generate_release_notes: true

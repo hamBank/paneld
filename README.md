@@ -8,7 +8,7 @@ Architecture, config schema and roadmap are in [`DESIGN.md`](DESIGN.md).
 
 **M0 (skeleton) is done.** It includes the config parsing and validation, canvas, render loop, HTTP preview sink, `clock` and `text` widgets, and the `run`, `check` and `render` commands. It runs on a laptop without hardware.
 
-**M1 (hardware) is code-complete, but untested on a real card.** It adds `colorlight-proto` (packet encoding), `colorlight-net` (Linux raw-socket transport, discovery), the Colorlight sink behind `[[output]] type = "colorlight"`, `paneld probe` and `paneld test-pattern --interface`. Bring-up on the Pi follows [`deploy/README.md`](deploy/README.md); the result (firmware version, port mapping, colour order) is still to be recorded, see `DESIGN.md` §15. The sink only works on Linux; other platforms build a stub.
+**M1 (hardware) is code-complete, but untested on a real card.** It adds `colorlight-proto` (packet encoding), `colorlight-net` (Linux raw-socket transport, discovery), the Colorlight sink behind `[[output]] type = "colorlight"`, `paneld probe` and `paneld test-pattern --interface`. Bring-up on the Pi follows [`deploy/README.md`](deploy/README.md), which also covers the systemd service (`deploy/paneld.service`, `deploy/env.example`, `deploy/install.sh`); the result (firmware version, port mapping, colour order) is still to be recorded, see `DESIGN.md` §15. The sink only works on Linux; other platforms build a stub.
 
 **M2 (scenes) is done:**
 - playlist rotation with conditions;
@@ -18,7 +18,19 @@ Architecture, config schema and roadmap are in [`DESIGN.md`](DESIGN.md).
 
 **M3 (data) is done:** data sources (`static`, `aircraft` via adsb.fi, `home_assistant`, `mqtt` (plain TCP), `http_poll`, `prometheus`) run under a supervisor and restart on failure. Hot reload restarts only the sources whose config changed. Text widgets take templates like `{ha:sensor.x:.1}°C`, and `value` widgets can map weather conditions to icons.
 
-Next: control API, MQTT discovery and notifications (M4); quiet hours and auto-dim are in. See `DESIGN.md` §14.
+**M4 (control) is done:**
+- an HTTP control API (`/api/*`, optional bearer token);
+- Home Assistant entities over MQTT discovery;
+- a notification queue with interrupt and resume;
+- quiet hours and auto-dim (schedule, sun, lux), with live brightness on the Colorlight card.
+
+**M5 (ops) is done:**
+- Prometheus `/metrics`;
+- a hardened systemd unit, a [Debian/Ubuntu/Pi OS install guide](deploy/INSTALL-debian.md) and a [bring-up and service guide](deploy/README.md);
+- Pi cross-compiling with a CI release build;
+- `--log-format json`.
+
+Next: multi-region / multi-card output and rotation (M6). See `DESIGN.md` §14.
 
 ## Hardware
 
@@ -225,7 +237,7 @@ The password is read from the environment variable named by `password_env` (`pan
 
 All routes live on the `[http] bind` address. Errors are always `{ "error": "..." }`. Commands (202) are applied by the render loop at the start of the next frame; a dead render loop gives 503. Request bodies are capped at 64 KiB (413) and the content type is not checked.
 
-If `[http] token_env` names an environment variable, every `/api/*` request needs `Authorization: Bearer <token>` (401 with `WWW-Authenticate: Bearer` otherwise). `paneld run` refuses to start if that variable is unset or empty. `/preview*` (and the future `/metrics`) are **never** authenticated. Without a token the API is open; paneld warns at start-up if that is on a non-loopback address.
+If `[http] token_env` names an environment variable, every `/api/*` request needs `Authorization: Bearer <token>` (401 with `WWW-Authenticate: Bearer` otherwise). `paneld run` refuses to start if that variable is unset or empty. `/preview*` and `/metrics` are **never** authenticated (see Metrics). Without a token the API is open; paneld warns at start-up if that is on a non-loopback address.
 
 ```bash
 H=http://localhost:8080 ; A='Authorization: Bearer '$PANELD_API_TOKEN   # drop -H "$A" if no token
@@ -308,9 +320,102 @@ Raw notifications go to `<base_topic>/notify` as the JSON of `POST /api/notify` 
 - **Errors never take the panel down.** A parse or validation error, an unreadable image, a canvas size change, or (with `run --scene X`) a config that no longer has scene `X` is logged with the full message, counted in `reload_errors`, and the old config keeps running. Fix the file and the next change is picked up. With `--scene X`, scene `X` stays on screen across reloads.
 - **Limitations:** image files referenced by the config are not watched; after replacing one, make any edit to the config or send SIGHUP.
 
+## Metrics
+
+`GET /metrics` serves Prometheus text format 0.0.4 on the `[http] bind` address. It is **not** behind the API bearer token, so a scraper needs no secret. It only contains counts and config-derived names (interface, source and scene names), but if you do not want it reachable from the network, bind `[http] bind` to `127.0.0.1` (scrape from the same host or via a reverse proxy) or firewall the port.
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `paneld_build_info` | gauge | `version` | always 1 |
+| `paneld_frames_rendered_total` | counter | | frames rendered |
+| `paneld_frames_skipped_total` | counter | | ticks skipped because rendering overran |
+| `paneld_render_duration_seconds` | histogram | | time to build a frame (buckets 0.5 ms to 100 ms) |
+| `paneld_fps` | gauge | | frames per second over the last second |
+| `paneld_sink_send_duration_seconds` | histogram | `sink` (interface) | time to send a frame to the card (buckets 0.1 ms to 50 ms) |
+| `paneld_sink_errors_total` | counter | `sink` | frames that failed to send |
+| `paneld_card_detected` | gauge | `card` (interface) | 1 if frames went out without error since the previous scrape |
+| `paneld_source_up` | gauge | `source` | 1 if the last attempt succeeded |
+| `paneld_source_errors_total` | counter | `source` | errors (resets when a reload restarts the source) |
+| `paneld_source_restarts_total` | counter | `source` | supervisor restarts of a failed source |
+| `paneld_source_last_update_timestamp_seconds` | gauge | `source` | Unix time of the last success; no sample before the first |
+| `paneld_store_keys` | gauge | | keys in the data store |
+| `paneld_notifications_queued` | gauge | | queued or showing notifications |
+| `paneld_config_reloads_total` | counter | | accepted reloads |
+| `paneld_config_reload_errors_total` | counter | | rejected reloads |
+| `paneld_current_scene` | gauge | `scene` | 1 for the scene on screen; no sample while black or an inline notification shows |
+| `paneld_power_on` | gauge | | 1 if the panel is on |
+| `paneld_brightness` | gauge | | user brightness 0-255 |
+| `paneld_dim` | gauge | | auto-dim factor 0-255 (255 = none) |
+
+Example scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: paneld
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["paneld.local:8080"]
+```
+
+Useful alerts: `paneld_source_up == 0`, `time() - paneld_source_last_update_timestamp_seconds > 600`, `paneld_card_detected == 0`, `increase(paneld_config_reload_errors_total[1h]) > 0`.
+
+## Building for the Pi
+
+The target is `aarch64-unknown-linux-gnu` (Raspberry Pi OS 64-bit). Release builds use thin LTO, one codegen unit and stripped symbols (see `[profile.release]` in `Cargo.toml`), which takes the binary from about 11.7 MiB to 6.8 MiB. Build times are longer than a default release build.
+
+**Plain cargo** on Debian or Ubuntu (an x86_64 or arm64 host):
+
+```bash
+sudo apt-get install gcc-aarch64-linux-gnu
+rustup target add aarch64-unknown-linux-gnu
+cargo build --release --locked --target aarch64-unknown-linux-gnu -p paneld
+# -> target/aarch64-unknown-linux-gnu/release/paneld
+```
+
+`.cargo/config.toml` sets the linker to `aarch64-linux-gnu-gcc`. The cross C compiler is also needed by `ring` (TLS), whose build script finds it by itself; no `CC_*` variable is required.
+
+**`cross`** (Docker or Podman, no host toolchain needed):
+
+```bash
+cargo install cross --locked
+cross build --release --locked --target aarch64-unknown-linux-gnu -p paneld
+```
+
+No `Cross.toml` is needed: cross's aarch64 image already contains the cross gcc ([cross-rs/cross](https://github.com/cross-rs/cross)).
+
+**glibc.** The binary links dynamically against glibc (`libc.so.6`, `libm.so.6`, `libgcc_s.so.1`; no OpenSSL) and needs glibc 2.34 or newer when built with Ubuntu 24.04's cross toolchain. Raspberry Pi OS 12 (Bookworm, glibc 2.36) and 13 (Trixie, glibc 2.41) are fine; Raspberry Pi OS 11 (Bullseye, glibc 2.31) is too old. Check a binary with:
+
+```bash
+aarch64-linux-gnu-readelf -V target/aarch64-unknown-linux-gnu/release/paneld | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
+```
+
+You can also build on the Pi itself with a plain `cargo build --release --locked -p paneld`.
+
+### Release artifacts
+
+`.github/workflows/release.yml` builds the aarch64 binary on every push to `main` and every `v*` tag (not on PRs). The workflow run has an artifact `paneld-aarch64-unknown-linux-gnu` with the binary (also named `paneld-aarch64-unknown-linux-gnu`) and `paneld-aarch64-unknown-linux-gnu.sha256`. For a `v*` tag, which must equal `v` plus the `paneld` crate version, both files are also attached to the GitHub release. The build fails if the binary needs a glibc newer than 2.36.
+
+```bash
+sha256sum -c paneld-aarch64-unknown-linux-gnu.sha256
+chmod +x paneld-aarch64-unknown-linux-gnu   # artifact downloads lose the execute bit
+```
+
+## Logging
+
+Logs go to stdout. The level comes from `RUST_LOG` (default `info`), for example `RUST_LOG=warn,paneld::sources=debug`.
+
+| Format | How to select | Use it for |
+|---|---|---|
+| `text` (default) | `--log-format text` | journald and terminals. One readable line per event; colours only on a terminal. |
+| `json` | `--log-format json` or `PANELD_LOG_FORMAT=json` | Log shippers (Vector, Promtail/Loki, Fluent Bit). One JSON object per line with `timestamp`, `level`, `fields` (including `message`) and `target`. |
+
+The flag overrides the environment variable. Under systemd keep `text`: journald stores each line as a plain message and adds its own timestamp, unit and priority, so JSON there only makes `journalctl` output harder to read. Use `json` when something else parses the lines, for example `PANELD_LOG_FORMAT=json` in the `EnvironmentFile`.
+
+Secrets (the Home Assistant token, the MQTT password, bearer and header values) come only from environment variables and are never logged. Source URLs are not logged either, since they may carry an API key in the query string.
+
 ## Development
 
-CI (`.github/workflows/ci.yml`) runs all of the following on every push to `main` and every PR, plus an aarch64 check for the Pi, a macOS check and an MSRV (Rust 1.85) check.
+CI (`.github/workflows/ci.yml`) runs all of the following on every push to `main` and every PR, plus an aarch64 check for the Pi, a macOS check and an MSRV (Rust 1.85) check. `release.yml` builds the Pi binary (see above).
 
 ```bash
 cargo test --workspace
