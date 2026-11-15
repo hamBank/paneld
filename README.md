@@ -30,7 +30,14 @@ Architecture, config schema and roadmap are in [`DESIGN.md`](DESIGN.md).
 - Pi cross-compiling with a CI release build;
 - `--log-format json`.
 
-In progress (M6): the output map (regions, rotation, flip; see [Output map](#output-map-regions-rotation-flip)). Next: daisy-chained cards, see `DESIGN.md` §14.
+**M6 (scale) is done:**
+- an output map from canvas regions to card space, with rotation and flip per region, e.g. an upside-down panel (see [Output map](#output-map-regions-rotation-flip));
+- `render --output` and `test-pattern --card-space` for checking a map without hardware;
+- multi-receiver discovery, with a `probe` table and layout warnings.
+
+Addressing of daisy-chained cards is inferred from the protocol references, not confirmed on hardware; see `crates/colorlight-proto/PROTOCOL.md`.
+
+Optional next: a video zone (M7). See `DESIGN.md` §14.
 
 ## Hardware
 
