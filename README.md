@@ -18,7 +18,19 @@ Architecture, config schema and roadmap are in [`DESIGN.md`](DESIGN.md).
 
 **M3 (data) is done:** data sources (`static`, `aircraft` via adsb.fi, `home_assistant`, `mqtt` (plain TCP), `http_poll`, `prometheus`) run under a supervisor and restart on failure. Hot reload restarts only the sources whose config changed. Text widgets take templates like `{ha:sensor.x:.1}°C`, and `value` widgets can map weather conditions to icons.
 
-Next: control API, MQTT discovery and notifications (M4); quiet hours and auto-dim are in. See `DESIGN.md` §14.
+**M4 (control) is done:**
+- an HTTP control API (`/api/*`, optional bearer token);
+- Home Assistant entities over MQTT discovery;
+- a notification queue with interrupt and resume;
+- quiet hours and auto-dim (schedule, sun, lux), with live brightness on the Colorlight card.
+
+**M5 (ops) is done:**
+- Prometheus `/metrics`;
+- a hardened systemd unit and install guide in [`deploy/`](deploy/README.md);
+- Pi cross-compiling with a CI release build;
+- `--log-format json`.
+
+Next: multi-region / multi-card output and rotation (M6). See `DESIGN.md` §14.
 
 ## Hardware
 
