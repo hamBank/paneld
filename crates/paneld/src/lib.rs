@@ -20,6 +20,7 @@ pub mod fonts;
 pub mod format;
 pub mod icons;
 pub mod inline;
+pub mod logging;
 pub mod media;
 pub mod metrics;
 pub mod mqtt_ha;

@@ -347,9 +347,63 @@ scrape_configs:
 
 Useful alerts: `paneld_source_up == 0`, `time() - paneld_source_last_update_timestamp_seconds > 600`, `paneld_card_detected == 0`, `increase(paneld_config_reload_errors_total[1h]) > 0`.
 
+## Building for the Pi
+
+The target is `aarch64-unknown-linux-gnu` (Raspberry Pi OS 64-bit). Release builds use thin LTO, one codegen unit and stripped symbols (see `[profile.release]` in `Cargo.toml`), which takes the binary from about 11.7 MiB to 6.8 MiB. Build times are longer than a default release build.
+
+**Plain cargo** on Debian or Ubuntu (an x86_64 or arm64 host):
+
+```bash
+sudo apt-get install gcc-aarch64-linux-gnu
+rustup target add aarch64-unknown-linux-gnu
+cargo build --release --locked --target aarch64-unknown-linux-gnu -p paneld
+# -> target/aarch64-unknown-linux-gnu/release/paneld
+```
+
+`.cargo/config.toml` sets the linker to `aarch64-linux-gnu-gcc`. The cross C compiler is also needed by `ring` (TLS), whose build script finds it by itself; no `CC_*` variable is required.
+
+**`cross`** (Docker or Podman, no host toolchain needed):
+
+```bash
+cargo install cross --locked
+cross build --release --locked --target aarch64-unknown-linux-gnu -p paneld
+```
+
+No `Cross.toml` is needed: cross's aarch64 image already contains the cross gcc ([cross-rs/cross](https://github.com/cross-rs/cross)).
+
+**glibc.** The binary links dynamically against glibc (`libc.so.6`, `libm.so.6`, `libgcc_s.so.1`; no OpenSSL) and needs glibc 2.34 or newer when built with Ubuntu 24.04's cross toolchain. Raspberry Pi OS 12 (Bookworm, glibc 2.36) and 13 (Trixie, glibc 2.41) are fine; Raspberry Pi OS 11 (Bullseye, glibc 2.31) is too old. Check a binary with:
+
+```bash
+aarch64-linux-gnu-readelf -V target/aarch64-unknown-linux-gnu/release/paneld | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
+```
+
+You can also build on the Pi itself with a plain `cargo build --release --locked -p paneld`.
+
+### Release artifacts
+
+`.github/workflows/release.yml` builds the aarch64 binary on every push to `main` and every `v*` tag (not on PRs). The workflow run has an artifact `paneld-aarch64-unknown-linux-gnu` with the binary (also named `paneld-aarch64-unknown-linux-gnu`) and `paneld-aarch64-unknown-linux-gnu.sha256`. For a `v*` tag, which must equal `v` plus the `paneld` crate version, both files are also attached to the GitHub release. The build fails if the binary needs a glibc newer than 2.36.
+
+```bash
+sha256sum -c paneld-aarch64-unknown-linux-gnu.sha256
+chmod +x paneld-aarch64-unknown-linux-gnu   # artifact downloads lose the execute bit
+```
+
+## Logging
+
+Logs go to stdout. The level comes from `RUST_LOG` (default `info`), for example `RUST_LOG=warn,paneld::sources=debug`.
+
+| Format | How to select | Use it for |
+|---|---|---|
+| `text` (default) | `--log-format text` | journald and terminals. One readable line per event; colours only on a terminal. |
+| `json` | `--log-format json` or `PANELD_LOG_FORMAT=json` | Log shippers (Vector, Promtail/Loki, Fluent Bit). One JSON object per line with `timestamp`, `level`, `fields` (including `message`) and `target`. |
+
+The flag overrides the environment variable. Under systemd keep `text`: journald stores each line as a plain message and adds its own timestamp, unit and priority, so JSON there only makes `journalctl` output harder to read. Use `json` when something else parses the lines, for example `PANELD_LOG_FORMAT=json` in the `EnvironmentFile`.
+
+Secrets (the Home Assistant token, the MQTT password, bearer and header values) come only from environment variables and are never logged. Source URLs are not logged either, since they may carry an API key in the query string.
+
 ## Development
 
-CI (`.github/workflows/ci.yml`) runs all of the following on every push to `main` and every PR, plus an aarch64 check for the Pi, a macOS check and an MSRV (Rust 1.85) check.
+CI (`.github/workflows/ci.yml`) runs all of the following on every push to `main` and every PR, plus an aarch64 check for the Pi, a macOS check and an MSRV (Rust 1.85) check. `release.yml` builds the Pi binary (see above).
 
 ```bash
 cargo test --workspace

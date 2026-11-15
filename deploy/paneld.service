@@ -46,9 +46,9 @@ ExecReload=/bin/kill -HUP $MAINPID
 EnvironmentFile=-/etc/paneld/env
 # Log filter. paneld uses tracing's EnvFilter (RUST_LOG, default "info").
 #Environment=RUST_LOG=info,paneld=debug
-# JSON logs for journald: not available yet. Uncomment and adjust once the logging
-# change lands (DESIGN.md 10 mentions a JSON option).
-#Environment=PANELD_LOG_FORMAT=json   # placeholder name, not implemented
+# Log format: plain text suits journald (it adds its own metadata). Use JSON
+# only if a log shipper (Vector, Loki, ...) reads the journal and wants it.
+#Environment=PANELD_LOG_FORMAT=json
 
 # Restart only on a crash or non-zero exit, not after `systemctl stop`
 # [service, Restart=]. RestartSec: default is 100 ms, which would spin on a

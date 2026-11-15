@@ -5,7 +5,6 @@ use anyhow::Context;
 use axum::Router;
 use chrono::{DateTime, Local};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use tracing_subscriber::EnvFilter;
 
 use paneld::color::Color;
 use paneld::colorlight_sink::{self, SinkSettings};
@@ -14,6 +13,7 @@ use paneld::config::{
     MIN_GAMMA,
 };
 use paneld::engine::{frame_channel, RenderLoop};
+use paneld::logging::{self, LogFormat};
 use paneld::store::Store;
 use paneld::test_pattern::{self, Pattern};
 use paneld::widgets::FrameCtx;
@@ -25,6 +25,10 @@ use paneld::{png_io, preview, reload, render};
     about = "Drive HUB75 LED panels from Home Assistant and friends"
 )]
 struct Cli {
+    /// Log line format: `text` for journald and terminals, `json` (one object
+    /// per line) for log shippers. The level filter is RUST_LOG (default info).
+    #[arg(long, global = true, value_enum, env = "PANELD_LOG_FORMAT", default_value_t = LogFormat::Text)]
+    log_format: LogFormat,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -316,13 +320,10 @@ fn probe_cmd(interface: &str, timeout_ms: u64) -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    let cli = Cli::parse();
+    logging::init(cli.log_format);
 
-    match Cli::parse().cmd {
+    match cli.cmd {
         Cmd::Run { config, scene } => run(config, scene),
         Cmd::Check { config } => {
             let cfg = Config::load(&config)?;
@@ -533,4 +534,53 @@ async fn shutdown_signal() {
         () = term => {},
     }
     tracing::info!("shutting down");
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(std::iter::once("paneld").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn log_format_flag_and_env_precedence() {
+        // One test: it touches the process environment, which other tests
+        // in this binary do not read.
+        std::env::remove_var("PANELD_LOG_FORMAT");
+        let cli = parse(&["run", "--config", "c.toml"]).unwrap();
+        assert_eq!(cli.log_format, LogFormat::Text);
+
+        // The flag works after the subcommand and before it.
+        let cli = parse(&["run", "--config", "c.toml", "--log-format", "json"]).unwrap();
+        assert_eq!(cli.log_format, LogFormat::Json);
+        let cli = parse(&["--log-format", "json", "check", "--config", "c.toml"]).unwrap();
+        assert_eq!(cli.log_format, LogFormat::Json);
+
+        // The environment variable sets the default; the flag overrides it.
+        std::env::set_var("PANELD_LOG_FORMAT", "json");
+        let cli = parse(&["run", "--config", "c.toml"]).unwrap();
+        assert_eq!(cli.log_format, LogFormat::Json);
+        let cli = parse(&["run", "--config", "c.toml", "--log-format", "text"]).unwrap();
+        assert_eq!(cli.log_format, LogFormat::Text);
+
+        std::env::set_var("PANELD_LOG_FORMAT", "yaml");
+        assert!(parse(&["run", "--config", "c.toml"]).is_err());
+        std::env::remove_var("PANELD_LOG_FORMAT");
+    }
+
+    #[test]
+    fn unknown_log_format_is_rejected() {
+        let err = parse(&["run", "--config", "c.toml", "--log-format", "xml"])
+            .err()
+            .expect("xml is not a format");
+        let msg = err.to_string();
+        assert!(msg.contains("text") && msg.contains("json"), "{msg}");
+    }
+
+    #[test]
+    fn run_still_requires_config() {
+        assert!(parse(&["run"]).is_err());
+    }
 }

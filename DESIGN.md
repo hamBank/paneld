@@ -540,14 +540,16 @@ As built (`metrics.rs`):
 - Additions beyond the original list: `paneld_build_info{version}`, `paneld_config_reloads_total`, `paneld_source_restarts_total{source}`, `paneld_fps`, `paneld_brightness` (0-255), `paneld_dim` (0-255), `paneld_power_on`. Names differ from the first sketch only by the unit suffix (`..._timestamp_seconds`).
 - Tests: encoder unit tests, a golden scrape (`tests/fixtures/golden/metrics.txt`, `UPDATE_GOLDEN=1`), a parser-based format checker run over every scrape, and HTTP tests with and without an API token.
 
-Logging: `tracing` with env-filter; JSON output option for journald.
+Logging: `tracing` with env-filter (`RUST_LOG`, default `info`), to stdout. `--log-format text|json` (global flag; env `PANELD_LOG_FORMAT`; default `text`) selects the format; `json` is one object per line (`timestamp`, `level`, `fields`, `target`) via tracing-subscriber's `json` feature (adds only `tracing-serde`). Text is the right choice for journald, which stores plain lines and adds its own metadata; JSON is for log shippers (Vector, Loki). ANSI colours only when stdout is a terminal. Secrets never reach log fields: tokens only come from `*_env` variables, and source URLs are never logged (they may hold query-string keys; reqwest errors are logged with `without_url()`). Implementation: `crates/paneld/src/logging.rs`.
 
 ---
 
 ## 11. Deployment (Pi)
 - Raspberry Pi 4/5, Raspberry Pi OS Lite 64-bit. Onboard Ethernet → LAN; USB 3 Gigabit adapter → Colorlight card (or the reverse; config picks the interface). Wi-Fi for LAN is also fine.
 - The card-facing interface gets **no IP config** (disable DHCP on it in NetworkManager/dhcpcd) so the OS doesn't spam it.
-- Cross-compile with `cross` for `aarch64-unknown-linux-gnu`, or build on-device.
+- Cross-compile for `aarch64-unknown-linux-gnu`: plain `cargo build --release --locked --target aarch64-unknown-linux-gnu -p paneld` with `gcc-aarch64-linux-gnu` installed (`.cargo/config.toml` sets the linker; `ring` finds the C compiler itself), or `cross` (no `Cross.toml` needed), or build on-device. `[profile.release]` uses thin LTO, `codegen-units = 1`, `strip` and keeps `panic = "unwind"` (thread panics are caught at `join`). About 11.7 MiB before, 6.8 MiB after.
+- The binary is dynamic against glibc (`libc`, `libm`, `libgcc_s`) and needs glibc >= 2.34 when linked against Ubuntu 24.04's cross sysroot: fine on Pi OS 12 Bookworm (2.36) and 13 Trixie (2.41), not Pi OS 11 Bullseye (2.31). Versions from packages.debian.org. If a newer sysroot ever raises that, build in an older container or use cargo-zigbuild with an explicit glibc target; not needed now.
+- CI (`.github/workflows/release.yml`) builds the binary on pushes to `main` and `v*` tags and uploads `paneld-aarch64-unknown-linux-gnu` (binary plus `.sha256`); a tag also attaches both to a GitHub release (`contents: write` only on that job). It fails if the binary needs glibc newer than 2.36 (Bookworm).
 - **systemd unit (as built, `deploy/paneld.service`; install guide in `deploy/README.md`):**
   - `DynamicUser=yes`: paneld writes nothing to disk at runtime (config, fonts and images are only read; the store, route cache and HA series are in memory), so there is no state directory to own, and a config without secrets can be `0644`. A dedicated user would only be needed for persistent state.
   - `AmbientCapabilities=CAP_NET_RAW` and `CapabilityBoundingSet=CAP_NET_RAW`, `NoNewPrivileges=yes`. HTTP binds a port above 1024, so no other capability is needed.

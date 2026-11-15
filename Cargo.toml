@@ -7,3 +7,11 @@ members = ["crates/colorlight-proto", "crates/colorlight-net", "crates/paneld"]
 edition = "2021"
 license = "MIT OR Apache-2.0"
 rust-version = "1.85"
+
+# Release builds are for the Pi: smaller binary and better inlining across
+# crates, at the cost of a slower build. `panic` stays "unwind": the render and
+# sink threads report panics through `JoinHandle::join`, which needs unwinding.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
