@@ -10,9 +10,20 @@
 //! # Frame order (PROTOCOL.md, "Frame order for the sink")
 //!
 //! 1. `0x0A` brightness (twice on firmware >= 13)
-//! 2. `0x55` row packets, every row, card offset 0
+//! 2. `0x55` row packets, every row of the card space (see below), offset 0
 //! 3. pause `sync_gap_us`
 //! 4. `0x01` display frame (twice on firmware >= 13)
+//!
+//! # Output map
+//!
+//! The rows are rows of the *card* space, not of the canvas: the sink first
+//! gathers the canvas through the output's [`OutputMap`] (a no-op without
+//! `[[output.region]]`), then applies gamma/white point and colour order.
+//! Every row of the card space is sent every frame, so card rows no region
+//! covers are sent as black. The card keeps showing whatever it last
+//! received, so skipping them would leave stale or power-on pixels there.
+//! Whole black rows cost a few percent of the frame, which is cheap next to
+//! a wrong picture.
 //!
 //! If sending the rows fails, the display frame is not sent, so the card
 //! keeps showing the last complete frame (as FPP does).
@@ -30,6 +41,7 @@ use colorlight_proto::{
 use tokio::sync::watch;
 
 use crate::metrics::{Histogram, SEND_BUCKETS};
+use crate::output_map::OutputMap;
 
 use crate::canvas::Canvas;
 use crate::config::{BrightnessMode, ColorOrder, ColorlightOutput};
@@ -55,23 +67,32 @@ pub struct SinkSettings {
     pub sync_gap: Duration,
     /// Firmware major version override; `None` = use discovery.
     pub firmware_major: Option<u8>,
-    /// Canvas size, used for the card-size sanity check.
-    pub canvas: (u32, u32),
+    /// The card's display space, used for the discovery size check.
+    pub card_size: (u32, u32),
+    /// Canvas to card mapping.
+    pub map: Arc<OutputMap>,
     /// First and maximum wait before re-opening a dead socket.
     pub reconnect_backoff: (Duration, Duration),
 }
 
 impl SinkSettings {
-    pub fn from_output(o: &ColorlightOutput, canvas_w: u32, canvas_h: u32) -> Self {
-        SinkSettings {
+    pub fn from_output(o: &ColorlightOutput, canvas_w: u32, canvas_h: u32) -> anyhow::Result<Self> {
+        let map = o.output_map(canvas_w, canvas_h).map_err(|e| {
+            anyhow::anyhow!(
+                "output map for the colorlight output on {}: {e}",
+                o.interface
+            )
+        })?;
+        Ok(SinkSettings {
             interface: o.interface.clone(),
             plan: BrightnessPlan::from_output(o),
             color_order: o.color_order,
             sync_gap: Duration::from_micros(u64::from(o.sync_gap_us)),
             firmware_major: o.firmware_major,
-            canvas: (canvas_w, canvas_h),
+            card_size: map.card_size(),
+            map: Arc::new(map),
             reconnect_backoff: (Duration::from_secs(1), Duration::from_secs(10)),
-        }
+        })
     }
 }
 
@@ -191,6 +212,11 @@ pub struct FrameSender {
     blank: bool,
     sync_gap: Duration,
     double_sync: bool,
+    /// Canvas to card mapping; `None` (or an identity map) sends the canvas
+    /// as it is.
+    map: Option<Arc<OutputMap>>,
+    /// The gathered card-space frame (reused).
+    card: Canvas,
     /// Corrected, reordered pixels of the current frame.
     pixels: Vec<u8>,
     /// All row packets of the current frame, back to back.
@@ -214,10 +240,18 @@ impl FrameSender {
             blank: false,
             sync_gap,
             double_sync,
+            map: None,
+            card: Canvas::new(0, 0),
             pixels: Vec::new(),
             wire: Vec::new(),
             spans: Vec::new(),
         }
+    }
+
+    /// Send the rows of the card space given by `map` instead of the canvas.
+    pub fn with_map(mut self, map: Arc<OutputMap>) -> Self {
+        self.map = Some(map);
+        self
     }
 
     /// Switch to a new brightness result (call when the level changes).
@@ -241,15 +275,26 @@ impl FrameSender {
         link: &mut L,
         canvas: &Canvas,
     ) -> anyhow::Result<Duration> {
-        let (w, h) = (canvas.width() as usize, canvas.height() as usize);
+        let map = self.map.clone().filter(|m| !m.is_identity());
+        let (w, h) = match &map {
+            Some(m) => {
+                let (w, h) = m.card_size();
+                (w as usize, h as usize)
+            }
+            None => (canvas.width() as usize, canvas.height() as usize),
+        };
         anyhow::ensure!(
             (1..=1 << 16).contains(&w) && (1..=1 << 16).contains(&h),
-            "canvas {w}x{h} does not fit the Colorlight protocol (max 65536 per side)"
+            "frame {w}x{h} does not fit the Colorlight protocol (max 65536 per side)"
         );
         // Preparing the packets is not part of the send time.
         if self.blank {
             self.pixels.clear();
             self.pixels.resize(w * h * 3, 0);
+        } else if let Some(m) = &map {
+            m.gather_into(canvas, &mut self.card)
+                .map_err(anyhow::Error::msg)?;
+            self.post.apply_into(&self.card, &mut self.pixels);
         } else {
             self.post.apply_into(canvas, &mut self.pixels);
         }
@@ -418,7 +463,8 @@ fn run<L, F>(
         first.card_brightness,
         settings.sync_gap,
         false,
-    );
+    )
+    .with_map(settings.map.clone());
     sender.set_applied(first);
     let mut levels_open = true;
     let mut configured = false;
@@ -537,18 +583,19 @@ fn startup_discovery<L: Link>(link: &mut L, s: &SinkSettings) -> Result<bool, Li
             reported_size = format!("{}x{}", c.width, c.height),
             "colorlight: found receiver"
         );
-        if (u32::from(c.width), u32::from(c.height)) != s.canvas {
+        if (u32::from(c.width), u32::from(c.height)) != s.card_size {
             // The card reports its own cabinet size, which need not equal
-            // the canvas (e.g. two panels on two ports), and FPP says the
-            // field is not always reliable (PROTOCOL.md). Hence a warning.
+            // the card space we send (e.g. two panels on two ports), and FPP
+            // says the field is not always reliable (PROTOCOL.md). Hence a
+            // warning.
             tracing::warn!(
                 receiver = c.receiver_index,
-                "colorlight: card reports {}x{} but the canvas is {}x{}; check the LEDVision \
+                "colorlight: card reports {}x{} but the card space is {}x{}; check the LEDVision \
                  settings if the picture is wrong",
                 c.width,
                 c.height,
-                s.canvas.0,
-                s.canvas.1
+                s.card_size.0,
+                s.card_size.1
             );
         }
     }
@@ -710,7 +757,7 @@ mod tests {
             let crate::config::OutputConfig::Colorlight(o) = &cfg.outputs[0] else {
                 unreachable!()
             };
-            let s = SinkSettings::from_output(o, 4, 2);
+            let s = SinkSettings::from_output(o, 4, 2).unwrap();
             let a = s.plan.apply(OutputLevel::FULL);
             assert_eq!(a.card_brightness, byte, "{mode}");
             assert_eq!(s.color_order, ColorOrder::Bgr);
@@ -831,6 +878,166 @@ mod tests {
         );
         // The second packet starts at pixel 497, whose red value is 497 % 256.
         assert_eq!(rows[1][ROW_HEADER_LEN], (497 % 256) as u8);
+    }
+
+    use crate::canvas::Rect;
+    use crate::output_map::{CardOffset, CardSize, Flip, RegionConfig, Rotation};
+
+    fn region(r: Rect, off: (u32, u32), rotate: Rotation) -> RegionConfig {
+        RegionConfig {
+            canvas: r,
+            card_offset: CardOffset { x: off.0, y: off.1 },
+            rotate,
+            flip: Flip::None,
+        }
+    }
+
+    /// The payload bytes (after the row header) of each `0x55` row packet.
+    fn row_payloads(link: &MockLink) -> Vec<(u16, Vec<u8>)> {
+        link.frames()
+            .into_iter()
+            .filter(|f| f[12] == 0x55)
+            .map(|f| {
+                (
+                    u16::from_be_bytes([f[13], f[14]]),
+                    f[ROW_HEADER_LEN..].to_vec(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn two_regions_one_upside_down_send_the_expected_rows() {
+        // Two 4x2 panels stacked on a 4x4 canvas; the bottom one is mounted
+        // upside down, so the card needs it rotated by 180 degrees.
+        let top = region(Rect::new(0, 0, 4, 2), (0, 0), Rotation::Deg0);
+        let bottom = region(Rect::new(0, 2, 4, 2), (0, 2), Rotation::Deg180);
+        let map = Arc::new(OutputMap::new(4, 4, &[top, bottom], None).unwrap());
+        let mut link = MockLink::new();
+        let mut s = sender(ColorOrder::Rgb, 255, false).with_map(map);
+        s.send(&mut link, &canvas(4, 4)).unwrap();
+        assert_eq!(kinds(&link), expected_order(1, 4));
+
+        let rows = row_payloads(&link);
+        let want = |f: &dyn Fn(u32) -> (u8, u8)| -> Vec<u8> {
+            (0..4)
+                .flat_map(|x| {
+                    let (px, py) = f(x);
+                    [px, py, 200]
+                })
+                .collect()
+        };
+        assert_eq!(rows.len(), 4);
+        // Rows 0 and 1: canvas rows 0 and 1 as they are.
+        assert_eq!(rows[0], (0, want(&|x| (x as u8, 0))));
+        assert_eq!(rows[1], (1, want(&|x| (x as u8, 1))));
+        // Rows 2 and 3: canvas rows 3 and 2, each reversed left to right.
+        assert_eq!(rows[2], (2, want(&|x| (3 - x as u8, 3))));
+        assert_eq!(rows[3], (3, want(&|x| (3 - x as u8, 2))));
+    }
+
+    #[test]
+    fn uncovered_card_rows_and_pixels_are_sent_as_black() {
+        // A 2x2 region at (3, 1) of a 6x4 card: all four rows are sent, each
+        // 6 pixels wide, black outside the region.
+        let r = region(Rect::new(1, 1, 2, 2), (3, 1), Rotation::Deg0);
+        let cs = CardSize { w: 6, h: 4 };
+        let map = Arc::new(OutputMap::new(4, 4, &[r], Some(cs)).unwrap());
+        let mut link = MockLink::new();
+        let mut s = sender(ColorOrder::Rgb, 255, false).with_map(map);
+        s.send(&mut link, &canvas(4, 4)).unwrap();
+        let rows = row_payloads(&link);
+        assert_eq!(rows.len(), 4);
+        for (y, (row, bytes)) in rows.iter().enumerate() {
+            assert_eq!(*row as usize, y);
+            assert_eq!(bytes.len(), 6 * 3);
+            for x in 0..6usize {
+                let px = &bytes[x * 3..x * 3 + 3];
+                let inside = (3..5).contains(&x) && (1..3).contains(&y);
+                if inside {
+                    let (sx, sy) = (x - 3 + 1, y - 1 + 1);
+                    assert_eq!(px, &[sx as u8, sy as u8, 200], "({x},{y})");
+                } else {
+                    assert_eq!(px, &[0, 0, 0], "({x},{y})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_mapped_card_is_wider_than_one_packet_and_still_split() {
+        let r = region(Rect::new(0, 0, 600, 1), (0, 0), Rotation::Deg90);
+        let map = Arc::new(OutputMap::new(600, 1, &[r], None).unwrap());
+        let mut link = MockLink::new();
+        let mut s = sender(ColorOrder::Rgb, 255, false).with_map(map);
+        s.send(&mut link, &canvas(600, 1)).unwrap();
+        // 600 rows of one pixel each.
+        assert_eq!(row_payloads(&link).len(), 600);
+    }
+
+    #[test]
+    fn post_processing_and_colour_order_apply_after_the_map() {
+        let r = region(Rect::new(0, 0, 2, 1), (0, 0), Rotation::Deg180);
+        let map = Arc::new(OutputMap::new(2, 1, &[r], None).unwrap());
+        let mut cv = Canvas::new(2, 1);
+        cv.set_pixel(0, 0, Rgb888::new(10, 20, 30));
+        cv.set_pixel(1, 0, Rgb888::new(40, 50, 60));
+        let mut link = MockLink::new();
+        let mut s = sender(ColorOrder::Bgr, 255, false).with_map(map);
+        s.send(&mut link, &cv).unwrap();
+        let rows = row_payloads(&link);
+        assert_eq!(rows[0].1, vec![60, 50, 40, 30, 20, 10]);
+    }
+
+    #[test]
+    fn a_canvas_of_the_wrong_size_is_an_error_not_a_panic() {
+        let map = Arc::new(
+            OutputMap::new(
+                4,
+                4,
+                &[region(Rect::new(0, 0, 4, 4), (0, 0), Rotation::Deg90)],
+                None,
+            )
+            .unwrap(),
+        );
+        let mut link = MockLink::new();
+        let mut s = sender(ColorOrder::Rgb, 255, false).with_map(map);
+        assert!(s.send(&mut link, &canvas(3, 3)).is_err());
+        assert!(link.events.is_empty());
+    }
+
+    #[test]
+    fn blank_frames_cover_the_whole_card_space() {
+        let r = region(Rect::new(0, 0, 4, 2), (0, 0), Rotation::Deg90);
+        let map = Arc::new(OutputMap::new(4, 2, &[r], None).unwrap());
+        let mut link = MockLink::new();
+        let mut s = sender(ColorOrder::Rgb, 0, false).with_map(map);
+        s.set_applied(Applied {
+            post: PostProcess::new(PostProcessParams::default()),
+            card_brightness: 0,
+            blank: true,
+        });
+        s.send(&mut link, &canvas(4, 2)).unwrap();
+        let rows = row_payloads(&link);
+        assert_eq!(rows.len(), 4);
+        assert!(rows.iter().all(|(_, b)| b == &vec![0u8; 6]));
+    }
+
+    #[test]
+    fn settings_build_the_map_from_the_output() {
+        let cfg = crate::config::Config::parse(
+            "[canvas]\nwidth = 6\nheight = 4\n[[scene]]\nname = \"s\"\n\
+             [[output]]\ntype = \"colorlight\"\ninterface = \"eth1\"\ncard_size = { w = 8, h = 8 }\n\
+             [[output.region]]\ncanvas = { x = 0, y = 0, w = 6, h = 4 }\nrotate = 90\n",
+        )
+        .unwrap();
+        let crate::config::OutputConfig::Colorlight(o) = &cfg.outputs[0] else {
+            unreachable!()
+        };
+        let s = SinkSettings::from_output(o, 6, 4).unwrap();
+        assert_eq!(s.card_size, (8, 8));
+        assert!(!s.map.is_identity());
+        assert_eq!(s.map.source_at(3, 0), Some((0, 0)));
     }
 
     #[test]
@@ -959,7 +1166,8 @@ mod tests {
             color_order: ColorOrder::Rgb,
             sync_gap: Duration::ZERO,
             firmware_major: Some(13),
-            canvas: (4, 2),
+            card_size: (4, 2),
+            map: Arc::new(OutputMap::identity(4, 2)),
             reconnect_backoff: (Duration::from_millis(5), Duration::from_millis(20)),
         };
         let (_level_tx, level_rx) = watch::channel(OutputLevel::FULL);

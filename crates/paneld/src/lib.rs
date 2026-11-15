@@ -25,6 +25,7 @@ pub mod media;
 pub mod metrics;
 pub mod mqtt_ha;
 pub mod notifications;
+pub mod output_map;
 pub mod png_io;
 pub mod postprocess;
 pub mod preview;

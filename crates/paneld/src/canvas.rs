@@ -83,6 +83,11 @@ impl Canvas {
         &self.pixels
     }
 
+    /// Row-major pixels, mutable.
+    pub fn pixels_mut(&mut self) -> &mut [Rgb888] {
+        &mut self.pixels
+    }
+
     /// Packed `RGBRGB…` bytes, row-major.
     pub fn to_rgb_bytes(&self) -> Vec<u8> {
         self.pixels

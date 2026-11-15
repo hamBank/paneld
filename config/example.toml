@@ -30,6 +30,22 @@ grid = true
 #                               # (find it with `paneld test-pattern --pattern bars`)
 # firmware_major = 11           # optional override if card discovery fails
 # sync_gap_us = 500             # 0..=20000, gap before the display frame
+#
+# Output map (optional): without [[output.region]] the whole canvas goes to the
+# card's origin (0,0). With regions, each copies a canvas rectangle to a place in
+# the card's own coordinates. Here two 172x86 panels on one card, the bottom one
+# mounted upside down. `card_size` (optional) is a key of the output, so it goes
+# before the first [[output.region]]: it is the card's whole display space,
+# default the bounding box of the regions; card pixels no region covers are sent
+# as black.
+# card_size = { w = 172, h = 172 }
+# [[output.region]]             # the top panel, as it is
+# canvas = { x = 0, y = 0, w = 172, h = 86 }
+# [[output.region]]             # the bottom panel, rotated 180 degrees
+# canvas = { x = 0, y = 86, w = 172, h = 86 }
+# card_offset = { x = 0, y = 86 }   # top-left of the result in card space, default 0,0
+# rotate = 180                  # clockwise: 0 (default), 90, 180, 270
+# flip = "none"                 # "none" (default), "horizontal", "vertical"; applied before rotate
 
 # Data sources (DESIGN.md §6) write store keys that widgets and conditions read.
 # Source types: static, home_assistant, aircraft, http_poll, prometheus (mqtt

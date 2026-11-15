@@ -129,9 +129,13 @@ Record the confirmed layouts in `crates/colorlight-proto/PROTOCOL.md` with links
 
 ### 4.4 Multiple panels / cards
 - The engine renders one **logical canvas** (e.g. 172×172 for the two stacked 172×86 panels).
-- An **output map** in config maps canvas regions to card coordinates: `card`, `canvas_rect`, `card_offset`. With one card this is a single region.
-- Multiple cards: either daisy-chained (single NIC, each card's region set in LEDVision) or one NIC per card. Support both by letting each `ColorlightSink` own an interface plus a list of regions. Confirm daisy-chain addressing against the protocol references before implementing.
-- Also support rotation/flip per region (panels mounted upside down happen).
+- Each `ColorlightSink` owns one interface and an **output map** (`output_map.rs`) from canvas regions to the card's coordinate space. Without `[[output.region]]` the map is one implicit region, the whole canvas at card origin, and the sink does no extra work.
+- A region is `canvas = {x,y,w,h}`, `card_offset = {x,y}` (default 0,0), `rotate` (0/90/180/270, clockwise) and `flip` (none/horizontal/vertical). **Flip is applied first, then rotation**, then the result is placed at `card_offset`; 90/270 give an `h×w` footprint. A 90° rotation puts the region's top edge on the right of the footprint. The exact formulas are in the `output_map.rs` module docs and are covered by exhaustive tests and golden images.
+- `card_size = {w,h}` on the output is the card's whole display space (default: the bounding box of the regions from the card origin). Validation: regions inside the canvas; no overlap in card space (overlap in canvas space is allowed, so one area can be mirrored); every footprint inside `card_size`; card space at most 4096 per side and 4 Mpx. Errors name the output and region index.
+- **Per-frame cost:** at startup a table with one `u32` per card pixel (the canvas pixel it shows, or none) is built. Each frame is one gather pass into a reused card-space buffer, *then* gamma/white point and colour order. Mapping first is no dearer than mapping last (those are per-pixel LUTs either way), reuses `PostProcess::apply_into` unchanged, and makes uncovered pixels plain black (LUT[0] = 0). An identity map is skipped entirely.
+- **Uncovered card pixels and rows are sent as black**, every frame: every row of the card space is sent, full width. The card shows whatever it last received, so omitting rows would leave power-on or stale content there; the cost is a few percent of the frame in the stacked-panel case (nothing when the regions tile the card).
+- Discovery's size warning compares against the card space. The debug aid `paneld render --output <n>` writes the card-space framebuffer of a colorlight output as a PNG; `paneld test-pattern --config --output [--card-space]` draws patterns through the map or directly in card coordinates.
+- Multiple cards: one NIC per card is `[[output]]` per interface. Daisy-chained cards on one NIC are modelled by one card space (`card_size`, `card_offset`) if they share a coordinate space; **confirming daisy-chain addressing against the protocol references is still open** (§15) and may add per-card addressing.
 
 ---
 
@@ -431,11 +435,16 @@ brightness_mode = "hardware" # "hardware": in the card's display frame; "softwar
 # firmware_major = 11        # optional override if card discovery fails (§4.2)
 color_order = "rgb"          # wire byte order: rgb, rbg, grb, gbr, brg, bgr (PROTOCOL.md "Pixel byte order")
 sync_gap_us = 500            # 0..=20000: gap between the last row packet and the display frame
-# M1: one output maps the whole canvas to card origin (0,0). Regions come in M6:
-#   [[output.region]]        # one card, two panels stacked
-#   canvas = { x = 0, y = 0, w = 172, h = 172 }
-#   card_offset = { x = 0, y = 0 }
-#   rotate = 0
+# Output map (§4.4). Without regions the whole canvas goes to card origin (0,0).
+# `card_size` is a key of the output, so it goes before the first region.
+#   card_size = { w = 172, h = 172 }   # optional; default: bounding box of the regions
+#   [[output.region]]        # one card, two panels stacked, the bottom one upside down
+#   canvas = { x = 0, y = 0, w = 172, h = 86 }
+#   [[output.region]]
+#   canvas = { x = 0, y = 86, w = 172, h = 86 }
+#   card_offset = { x = 0, y = 86 }    # default 0,0
+#   rotate = 180                       # 0 (default), 90, 180, 270, clockwise
+#   flip = "none"                      # none (default), horizontal, vertical; applied before rotate
 
 [[output]]
 type = "preview"
@@ -564,7 +573,7 @@ Logging: `tracing` with env-filter (`RUST_LOG`, default `info`), to stdout. `--l
 ---
 
 ## 12. Testing strategy
-- `colorlight-proto`: byte-exact encode tests against fixtures from captures/reference implementations; property tests for row splitting and region mapping.
+- `colorlight-proto`: byte-exact encode tests against fixtures from captures/reference implementations; property tests for row splitting. Region mapping (`output_map.rs`) is tested exhaustively over many small sizes with loops (every rotation × flip: bijection and inverse round-trip, offsets, several regions, uncovered pixels), plus golden images of `render --output`.
 - Widgets/scenes: **golden image tests**. Render a scene with a fixed store snapshot + fixed clock into PNG, compare to `tests/fixtures/golden/*.png`. Provide `UPDATE_GOLDEN=1` to regenerate.
 - Scheduler: deterministic tests with an injected clock (notification interrupt/resume, conditional skip, pinning).
 - Config: parse/validate tests incl. error messages for bad configs.
@@ -577,8 +586,8 @@ Logging: `tracing` with env-filter (`RUST_LOG`, default `info`), to stdout. `--l
 - `paneld run --config path`: main daemon
 - `paneld check --config path`: validate config and exit
 - `paneld probe --interface eth1 [--timeout-ms 500]`: detect card(s), print index, model, firmware, reported size and whether double sync is needed; exits non-zero if none answer. Needs CAP_NET_RAW.
-- `paneld test-pattern --width W --height H [--out png] [--interface eth1]`: colour bars / gradient / panel IDs / grid / solid / walk, for bring-up. With `--interface` it sends continuously at `--fps` (default 30) until Ctrl-C, using the same sink as `run`, with `--brightness` (default 64), `--gamma` (default 1.0), `--color-order`, `--firmware-major` and `--sync-gap-us`.
-- `paneld render --config path --scene home --out frame.png`: offline render of one scene (uses golden-test path)
+- `paneld test-pattern --width W --height H [--out png] [--interface eth1]`: colour bars / gradient / panel IDs / grid / solid / walk, for bring-up. With `--interface` it sends continuously at `--fps` (default 30) until Ctrl-C, using the same sink as `run`, with `--brightness` (default 64), `--gamma` (default 1.0), `--color-order`, `--firmware-major` and `--sync-gap-us`. `--config path --output N` takes the canvas size and output map from a colorlight output (patterns are drawn in canvas space and go through the map); `--card-space` draws directly in card coordinates instead.
+- `paneld render --config path --scene home --out frame.png [--output N]`: offline render of one scene (uses golden-test path); with `--output` the card-space framebuffer of colorlight output N (canvas through the output map, no post-processing)
 
 ---
 
