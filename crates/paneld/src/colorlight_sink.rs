@@ -537,26 +537,13 @@ fn startup_discovery<L: Link>(link: &mut L, s: &SinkSettings) -> Result<bool, Li
             reported_size = format!("{}x{}", c.width, c.height),
             "colorlight: found receiver"
         );
-        if (u32::from(c.width), u32::from(c.height)) != s.canvas {
-            // The card reports its own cabinet size, which need not equal
-            // the canvas (e.g. two panels on two ports), and FPP says the
-            // field is not always reliable (PROTOCOL.md). Hence a warning.
-            tracing::warn!(
-                receiver = c.receiver_index,
-                "colorlight: card reports {}x{} but the canvas is {}x{}; check the LEDVision \
-                 settings if the picture is wrong",
-                c.width,
-                c.height,
-                s.canvas.0,
-                s.canvas.1
-            );
-        }
+    }
+    // The sink's card space is the canvas today; the output map will change
+    // what is passed here.
+    for w in colorlight_net::check_layout(s.canvas, &cards) {
+        tracing::warn!("colorlight: {w}");
     }
     let highest = cards.iter().map(|c| c.firmware_major).max();
-    let mixed = cards.iter().any(|c| Some(c.firmware_major) != highest);
-    if mixed {
-        tracing::warn!("colorlight: receivers on one interface run different firmware majors");
-    }
     let major = match (s.firmware_major, highest) {
         (Some(m), found) => {
             if found.is_some_and(|f| f != m) {

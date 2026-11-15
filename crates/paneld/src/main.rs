@@ -286,6 +286,73 @@ fn send_pattern(
     Ok(())
 }
 
+/// The text `probe` prints for the receivers on one port: a table, the card
+/// space the port expects and any warnings. Offsets are not shown: no
+/// reference documents where a receiver reports its x/y position
+/// (PROTOCOL.md, "Multiple receivers").
+fn probe_report(cards: &[colorlight_proto::DiscoveryResponse]) -> String {
+    use std::fmt::Write as _;
+    let layout = colorlight_net::Layout::from_receivers(cards);
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "{:>8}  {:<9} {:<8} {:<13} offset",
+        "receiver", "model", "firmware", "reported size"
+    );
+    for c in cards {
+        let model = if c.model == colorlight_proto::MODEL_5A {
+            "5A".to_string()
+        } else {
+            format!("0x{:02x}", c.model)
+        };
+        let _ = writeln!(
+            out,
+            "{:>8}  {:<9} {:<8} {:<13} unknown",
+            c.receiver_index,
+            model,
+            format!("{}.{}", c.firmware_major, c.firmware_minor),
+            format!("{}x{}", c.width, c.height),
+        );
+    }
+    let _ = writeln!(out, "{} receiver(s) found", cards.len());
+    if let Some((w, h)) = layout.reported_extent {
+        let _ = writeln!(
+            out,
+            "card space the port expects: {w}x{h} (largest size any receiver reports; \
+             unconfirmed, see PROTOCOL.md, \"Multiple receivers\")"
+        );
+        if !layout.sizes_agree {
+            let _ = writeln!(
+                out,
+                "note: the receivers report different sizes; the references don't say \
+                 whether that is normal on a chain"
+            );
+        }
+    }
+    let _ = writeln!(
+        out,
+        "double sync (firmware >= 13): {}",
+        if layout
+            .highest_firmware_major
+            .is_some_and(colorlight_proto::needs_double_sync)
+        {
+            "yes"
+        } else {
+            "no"
+        }
+    );
+    // The sink compares the sizes with its own card space at startup; here
+    // only the firmware mix can be judged.
+    if layout.mixed_firmware() {
+        let w = colorlight_net::Warning::MixedFirmware {
+            new: layout.new_firmware,
+            old: layout.old_firmware,
+        };
+        let _ = writeln!(out, "warning: {w}");
+    }
+    out
+}
+
 fn probe_cmd(interface: &str, timeout_ms: u64) -> anyhow::Result<()> {
     anyhow::ensure!(
         (1..=10_000).contains(&timeout_ms),
@@ -299,23 +366,7 @@ fn probe_cmd(interface: &str, timeout_ms: u64) -> anyhow::Result<()> {
          Check the cable, that the card is powered and on this NIC, that the NIC has link, \
          and that the card's firmware answers raw Ethernet discovery"
     );
-    for c in &cards {
-        let model = if c.model == colorlight_proto::MODEL_5A {
-            "5A".to_string()
-        } else {
-            format!("unknown (0x{:02x})", c.model)
-        };
-        println!(
-            "receiver {}: model {model}, firmware {}.{}, reported size {}x{}, double sync: {}",
-            c.receiver_index,
-            c.firmware_major,
-            c.firmware_minor,
-            c.width,
-            c.height,
-            if c.needs_double_sync() { "yes" } else { "no" },
-        );
-    }
-    println!("{} receiver(s) found", cards.len());
+    print!("{}", probe_report(&cards));
     Ok(())
 }
 
@@ -542,6 +593,48 @@ mod cli_tests {
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(std::iter::once("paneld").chain(args.iter().copied()))
+    }
+
+    fn rx(index: u8, major: u8, w: u16, h: u16) -> colorlight_proto::DiscoveryResponse {
+        colorlight_proto::DiscoveryResponse {
+            model: colorlight_proto::MODEL_5A,
+            firmware_major: major,
+            firmware_minor: 4,
+            width: w,
+            height: h,
+            receiver_index: index,
+            packets_received: 0,
+            uptime_ms: 0,
+        }
+    }
+
+    #[test]
+    fn probe_report_for_a_two_receiver_chain() {
+        let out = probe_report(&[rx(0, 11, 128, 64), rx(1, 11, 128, 64)]);
+        let want = "\
+receiver  model     firmware reported size offset
+       0  5A        11.4     128x64        unknown
+       1  5A        11.4     128x64        unknown
+2 receiver(s) found
+card space the port expects: 128x64 (largest size any receiver reports; unconfirmed, see PROTOCOL.md, \"Multiple receivers\")
+double sync (firmware >= 13): no
+";
+        assert_eq!(out, want);
+    }
+
+    #[test]
+    fn probe_report_warns_about_mixed_firmware_and_differing_sizes() {
+        let out = probe_report(&[rx(0, 11, 64, 32), rx(1, 13, 128, 64)]);
+        assert!(out.contains("card space the port expects: 128x64"), "{out}");
+        assert!(
+            out.contains("note: the receivers report different sizes"),
+            "{out}"
+        );
+        assert!(out.contains("double sync (firmware >= 13): yes"), "{out}");
+        assert!(
+            out.contains("warning: receivers [1] run firmware >= 13 and receivers [0] older"),
+            "{out}"
+        );
     }
 
     #[test]
