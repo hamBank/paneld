@@ -355,7 +355,7 @@ A local source can poll every 1 s, since there is no external limit. Internally 
 - **Pinning** is in the scheduler. A pinned scene shows regardless of its condition, while the playlist's own clock keeps running; notifications still interrupt it (§5.5). A pin survives config reloads by scene name, and is released if the scene disappears.
 
 ### 7.1 HTTP (axum)
-- `GET  /metrics`: Prometheus (M5)
+- `GET  /metrics`: Prometheus text format 0.0.4, never authenticated (§10)
 - `GET  /preview.png`, `GET /preview`: current frame / tiny HTML page. Never authenticated.
 - `GET  /api/state`: current scene, pin, notification queue, on/off, brightness, dim, fps (200)
 - `POST /api/notify`: `{ "text": "...", "icon": "...", "color": "#ff0000", "duration_s": 10, "priority": 5 }` or `{ "scene": "..." }` (202; 400 on bad input); `DELETE /api/notify` clears all (202)
@@ -527,13 +527,18 @@ Secrets only via env vars (`*_env` keys). Never commit tokens.
 ---
 
 ## 10. Observability
-Prometheus metrics (prefix `paneld_`):
-- `frames_rendered_total`, `frames_skipped_total`, `render_duration_seconds` (histogram)
-- `sink_send_duration_seconds{sink}`, `sink_errors_total{sink}`
-- `card_detected{card}` (gauge 0/1)
-- `source_up{source}`, `source_errors_total{source}`, `source_last_update_timestamp{source}`
-- `store_keys`, `notifications_queued`
-- `config_reload_errors_total`, `current_scene{scene}` (info-style gauge)
+Prometheus metrics at `GET /metrics`, text exposition format 0.0.4 (`Content-Type: text/plain; version=0.0.4; charset=utf-8`), prefix `paneld_`. Names follow the Prometheus naming practices (base units, `_total` on counters, `_timestamp_seconds`, `_build_info`). Full list with types and labels: README "Metrics".
+
+As built (`metrics.rs`):
+- **No crate.** The text format is hand-written (`Encoder`): HELP/TYPE, label escaping (`\`, `"`, newline), cumulative histogram buckets ending in `+Inf`, `_sum`, `_count`. Sources: <https://prometheus.io/docs/instrumenting/exposition_formats/>, <https://prometheus.io/docs/practices/naming/>, <https://prometheus.io/docs/concepts/metric_types/>.
+- **Histograms** (`Histogram`) are lock-free: one `AtomicU64` per bucket plus an atomic sum in nanoseconds. `observe` is a few relaxed atomic adds, so the render thread and the sink threads record without locks or I/O. The render loop times each frame from the start of the tick's work to the publish (not the sleep); a sink times each frame send. Buckets (seconds): render 0.0005 0.001 0.002 0.005 0.01 0.02 0.033 0.05 0.1; sink send 0.0001 0.0002 0.0005 0.001 0.002 0.005 0.01 0.02 0.05. `_count` and `+Inf` are the total of the buckets read, so they always agree; the sum may lag by one in-flight frame.
+- **Scraping never blocks the pipeline.** The handler reads atomics, one `watch` status borrow and a store snapshot (one `Arc` clone). It takes the supervisor's `tokio::sync::Mutex` only to clone the health map, waits at most 100 ms for it, and on timeout (a reload is stopping sources) serves the source list of the previous scrape. The lock is dropped before encoding.
+- **`/metrics` is outside the API auth layer** (like `/preview*`), so a Prometheus server needs no token. It exposes names from the config (interfaces, source and scene names) and counts, never URLs, locations, tokens or store values. To restrict it, bind `[http] bind` to loopback and scrape from the same host or through a reverse proxy, or firewall the port.
+- **`paneld_card_detected{card}`** reuses the Home Assistant card logic (`mqtt_ha::CardCheck`): 1 if the sink sent frames and had no send error since the previous scrape. Each registry keeps its own previous counters, so scrapes and HA sampling do not disturb each other. With several scrapers the window is the time since any scrape.
+- **`paneld_current_scene{scene}`** is an info-style gauge: value 1 for the scene on screen, no sample at all while nothing is eligible (black) or an inline notification shows (`Status.scene` is `None`). Query `count(paneld_current_scene) == 0` for "no scene".
+- `paneld_source_last_update_timestamp_seconds{source}` has no sample until the source first succeeds. Per-source counters restart from 0 when a config reload restarts that source (normal counter reset).
+- Additions beyond the original list: `paneld_build_info{version}`, `paneld_config_reloads_total`, `paneld_source_restarts_total{source}`, `paneld_fps`, `paneld_brightness` (0-255), `paneld_dim` (0-255), `paneld_power_on`. Names differ from the first sketch only by the unit suffix (`..._timestamp_seconds`).
+- Tests: encoder unit tests, a golden scrape (`tests/fixtures/golden/metrics.txt`, `UPDATE_GOLDEN=1`), a parser-based format checker run over every scrape, and HTTP tests with and without an API token.
 
 Logging: `tracing` with env-filter; JSON output option for journald.
 

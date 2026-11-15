@@ -225,7 +225,7 @@ The password is read from the environment variable named by `password_env` (`pan
 
 All routes live on the `[http] bind` address. Errors are always `{ "error": "..." }`. Commands (202) are applied by the render loop at the start of the next frame; a dead render loop gives 503. Request bodies are capped at 64 KiB (413) and the content type is not checked.
 
-If `[http] token_env` names an environment variable, every `/api/*` request needs `Authorization: Bearer <token>` (401 with `WWW-Authenticate: Bearer` otherwise). `paneld run` refuses to start if that variable is unset or empty. `/preview*` (and the future `/metrics`) are **never** authenticated. Without a token the API is open; paneld warns at start-up if that is on a non-loopback address.
+If `[http] token_env` names an environment variable, every `/api/*` request needs `Authorization: Bearer <token>` (401 with `WWW-Authenticate: Bearer` otherwise). `paneld run` refuses to start if that variable is unset or empty. `/preview*` and `/metrics` are **never** authenticated (see Metrics). Without a token the API is open; paneld warns at start-up if that is on a non-loopback address.
 
 ```bash
 H=http://localhost:8080 ; A='Authorization: Bearer '$PANELD_API_TOKEN   # drop -H "$A" if no token
@@ -307,6 +307,45 @@ Raw notifications go to `<base_topic>/notify` as the JSON of `POST /api/notify` 
 - **Rejected:** a changed `canvas` width or height, since scenes laid out for a new size would not fit the running canvas. Restart to resize.
 - **Errors never take the panel down.** A parse or validation error, an unreadable image, a canvas size change, or (with `run --scene X`) a config that no longer has scene `X` is logged with the full message, counted in `reload_errors`, and the old config keeps running. Fix the file and the next change is picked up. With `--scene X`, scene `X` stays on screen across reloads.
 - **Limitations:** image files referenced by the config are not watched; after replacing one, make any edit to the config or send SIGHUP.
+
+## Metrics
+
+`GET /metrics` serves Prometheus text format 0.0.4 on the `[http] bind` address. It is **not** behind the API bearer token, so a scraper needs no secret. It only contains counts and config-derived names (interface, source and scene names), but if you do not want it reachable from the network, bind `[http] bind` to `127.0.0.1` (scrape from the same host or via a reverse proxy) or firewall the port.
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `paneld_build_info` | gauge | `version` | always 1 |
+| `paneld_frames_rendered_total` | counter | | frames rendered |
+| `paneld_frames_skipped_total` | counter | | ticks skipped because rendering overran |
+| `paneld_render_duration_seconds` | histogram | | time to build a frame (buckets 0.5 ms to 100 ms) |
+| `paneld_fps` | gauge | | frames per second over the last second |
+| `paneld_sink_send_duration_seconds` | histogram | `sink` (interface) | time to send a frame to the card (buckets 0.1 ms to 50 ms) |
+| `paneld_sink_errors_total` | counter | `sink` | frames that failed to send |
+| `paneld_card_detected` | gauge | `card` (interface) | 1 if frames went out without error since the previous scrape |
+| `paneld_source_up` | gauge | `source` | 1 if the last attempt succeeded |
+| `paneld_source_errors_total` | counter | `source` | errors (resets when a reload restarts the source) |
+| `paneld_source_restarts_total` | counter | `source` | supervisor restarts of a failed source |
+| `paneld_source_last_update_timestamp_seconds` | gauge | `source` | Unix time of the last success; no sample before the first |
+| `paneld_store_keys` | gauge | | keys in the data store |
+| `paneld_notifications_queued` | gauge | | queued or showing notifications |
+| `paneld_config_reloads_total` | counter | | accepted reloads |
+| `paneld_config_reload_errors_total` | counter | | rejected reloads |
+| `paneld_current_scene` | gauge | `scene` | 1 for the scene on screen; no sample while black or an inline notification shows |
+| `paneld_power_on` | gauge | | 1 if the panel is on |
+| `paneld_brightness` | gauge | | user brightness 0-255 |
+| `paneld_dim` | gauge | | auto-dim factor 0-255 (255 = none) |
+
+Example scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: paneld
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["paneld.local:8080"]
+```
+
+Useful alerts: `paneld_source_up == 0`, `time() - paneld_source_last_update_timestamp_seconds > 600`, `paneld_card_detected == 0`, `increase(paneld_config_reload_errors_total[1h]) > 0`.
 
 ## Development
 

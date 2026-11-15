@@ -1,0 +1,99 @@
+# HELP paneld_build_info Build information; the value is always 1.
+# TYPE paneld_build_info gauge
+paneld_build_info{version="1.2.3"} 1
+# HELP paneld_frames_rendered_total Frames rendered.
+# TYPE paneld_frames_rendered_total counter
+paneld_frames_rendered_total 900
+# HELP paneld_frames_skipped_total Frame ticks skipped because rendering overran its period.
+# TYPE paneld_frames_skipped_total counter
+paneld_frames_skipped_total 2
+# HELP paneld_render_duration_seconds Time to build one frame, excluding the wait for the next tick.
+# TYPE paneld_render_duration_seconds histogram
+paneld_render_duration_seconds_bucket{le="0.0005"} 0
+paneld_render_duration_seconds_bucket{le="0.001"} 850
+paneld_render_duration_seconds_bucket{le="0.002"} 890
+paneld_render_duration_seconds_bucket{le="0.005"} 898
+paneld_render_duration_seconds_bucket{le="0.01"} 899
+paneld_render_duration_seconds_bucket{le="0.02"} 899
+paneld_render_duration_seconds_bucket{le="0.033"} 899
+paneld_render_duration_seconds_bucket{le="0.05"} 900
+paneld_render_duration_seconds_bucket{le="0.1"} 900
+paneld_render_duration_seconds_bucket{le="+Inf"} 900
+paneld_render_duration_seconds_sum 1.25
+paneld_render_duration_seconds_count 900
+# HELP paneld_fps Frames rendered per second.
+# TYPE paneld_fps gauge
+paneld_fps 29.9
+# HELP paneld_sink_send_duration_seconds Time to send one frame to a Colorlight card, by output interface.
+# TYPE paneld_sink_send_duration_seconds histogram
+paneld_sink_send_duration_seconds_bucket{sink="eth1",le="0.0001"} 0
+paneld_sink_send_duration_seconds_bucket{sink="eth1",le="0.0002"} 0
+paneld_sink_send_duration_seconds_bucket{sink="eth1",le="0.0005"} 5
+paneld_sink_send_duration_seconds_bucket{sink="eth1",le="0.001"} 885
+paneld_sink_send_duration_seconds_bucket{sink="eth1",le="0.002"} 895
+paneld_sink_send_duration_seconds_bucket{sink="eth1",le="0.005"} 898
+paneld_sink_send_duration_seconds_bucket{sink="eth1",le="0.01"} 899
+paneld_sink_send_duration_seconds_bucket{sink="eth1",le="0.02"} 900
+paneld_sink_send_duration_seconds_bucket{sink="eth1",le="0.05"} 900
+paneld_sink_send_duration_seconds_bucket{sink="eth1",le="+Inf"} 900
+paneld_sink_send_duration_seconds_sum{sink="eth1"} 0.9
+paneld_sink_send_duration_seconds_count{sink="eth1"} 900
+paneld_sink_send_duration_seconds_bucket{sink="wei\"rd\\if",le="0.0001"} 0
+paneld_sink_send_duration_seconds_bucket{sink="wei\"rd\\if",le="0.0002"} 0
+paneld_sink_send_duration_seconds_bucket{sink="wei\"rd\\if",le="0.0005"} 0
+paneld_sink_send_duration_seconds_bucket{sink="wei\"rd\\if",le="0.001"} 0
+paneld_sink_send_duration_seconds_bucket{sink="wei\"rd\\if",le="0.002"} 0
+paneld_sink_send_duration_seconds_bucket{sink="wei\"rd\\if",le="0.005"} 0
+paneld_sink_send_duration_seconds_bucket{sink="wei\"rd\\if",le="0.01"} 0
+paneld_sink_send_duration_seconds_bucket{sink="wei\"rd\\if",le="0.02"} 0
+paneld_sink_send_duration_seconds_bucket{sink="wei\"rd\\if",le="0.05"} 0
+paneld_sink_send_duration_seconds_bucket{sink="wei\"rd\\if",le="+Inf"} 0
+paneld_sink_send_duration_seconds_sum{sink="wei\"rd\\if"} 0
+paneld_sink_send_duration_seconds_count{sink="wei\"rd\\if"} 0
+# HELP paneld_sink_errors_total Frames that failed to send, by output interface.
+# TYPE paneld_sink_errors_total counter
+paneld_sink_errors_total{sink="eth1"} 1
+paneld_sink_errors_total{sink="wei\"rd\\if"} 0
+# HELP paneld_card_detected 1 if the card's sink sent frames without error since the previous scrape.
+# TYPE paneld_card_detected gauge
+paneld_card_detected{card="eth1"} 1
+paneld_card_detected{card="wei\"rd\\if"} 0
+# HELP paneld_source_up 1 if the source's last attempt succeeded.
+# TYPE paneld_source_up gauge
+paneld_source_up{source="ha"} 1
+paneld_source_up{source="weather"} 0
+# HELP paneld_source_errors_total Errors reported by a source; resets when the source is restarted by a config reload.
+# TYPE paneld_source_errors_total counter
+paneld_source_errors_total{source="ha"} 3
+paneld_source_errors_total{source="weather"} 0
+# HELP paneld_source_restarts_total Times the supervisor restarted a failed source.
+# TYPE paneld_source_restarts_total counter
+paneld_source_restarts_total{source="ha"} 1
+paneld_source_restarts_total{source="weather"} 0
+# HELP paneld_source_last_update_timestamp_seconds Unix time of the source's last success; no sample until it first succeeds.
+# TYPE paneld_source_last_update_timestamp_seconds gauge
+paneld_source_last_update_timestamp_seconds{source="ha"} 1767225600.5
+# HELP paneld_store_keys Keys in the data store.
+# TYPE paneld_store_keys gauge
+paneld_store_keys 42
+# HELP paneld_notifications_queued Notifications waiting or showing.
+# TYPE paneld_notifications_queued gauge
+paneld_notifications_queued 1
+# HELP paneld_config_reloads_total Config reloads that were accepted.
+# TYPE paneld_config_reloads_total counter
+paneld_config_reloads_total 4
+# HELP paneld_config_reload_errors_total Config reloads that were rejected; the old config kept running.
+# TYPE paneld_config_reload_errors_total counter
+paneld_config_reload_errors_total 2
+# HELP paneld_current_scene 1 for the scene on screen; no sample while black or an inline notification shows.
+# TYPE paneld_current_scene gauge
+paneld_current_scene{scene="home"} 1
+# HELP paneld_power_on 1 if the panel is switched on.
+# TYPE paneld_power_on gauge
+paneld_power_on 1
+# HELP paneld_brightness User brightness, 0 to 255.
+# TYPE paneld_brightness gauge
+paneld_brightness 128
+# HELP paneld_dim Auto-dim factor, 0 to 255 (255 = no dimming).
+# TYPE paneld_dim gauge
+paneld_dim 255
