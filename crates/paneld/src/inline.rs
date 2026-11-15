@@ -15,8 +15,15 @@ use crate::widgets::{IconWidget, Text};
 const MARGIN: u32 = 2;
 /// Pixels between the icon and the text.
 const GAP: u32 = 4;
-/// Scroll speed of text that is too wide, in pixels per second.
+/// Minimum scroll speed of text that is too wide, in pixels per second.
 pub const SCROLL_PX_PER_S: f32 = 40.0;
+/// Scrolling text moves about this many characters per second, so a larger
+/// font does not read slower.
+const SCROLL_CHARS_PER_S: f32 = 3.0;
+/// Scrolling text uses the largest font at most this fraction of the canvas
+/// height (1/6: about 28 px on a 172 px canvas). Big enough to read from
+/// across a room, small enough that a line scrolls past in reasonable time.
+const SCROLL_HEIGHT_DIVISOR: u32 = 6;
 /// With no `[notifications] font`, only built-in fonts at least this tall
 /// are considered: smaller text is unreadable from a distance.
 const MIN_LINE_HEIGHT: u32 = 13;
@@ -29,7 +36,8 @@ fn icon_scale(line_height: u32) -> u32 {
 /// Build the full-screen scene for `notice`: icon and text centred on the
 /// canvas in the notice's colour over the configured background, in the
 /// largest font that fits. Text too wide even for the smallest font
-/// scrolls beside a fixed icon.
+/// scrolls beside a fixed icon, in the largest font no taller than a
+/// sixth of the canvas height.
 pub fn scene(cfg: &NotificationsConfig, width: u32, height: u32, notice: &InlineNotice) -> Scene {
     let icon = notice.icon.as_deref().and_then(icons::lookup);
     let color = notice.color.0;
@@ -62,8 +70,19 @@ pub fn scene(cfg: &NotificationsConfig, width: u32, height: u32, notice: &Inline
     let best = candidates.iter().rev().find(|f| fits(f));
     let (font, scrolls) = match best {
         Some(f) => (f.clone(), false),
-        None => (candidates.first().expect("candidates").clone(), true),
+        None => {
+            let max_h = (height / SCROLL_HEIGHT_DIVISOR).max(1);
+            let f = candidates
+                .iter()
+                .rev()
+                .find(|f| f.line_height() <= max_h)
+                .or(candidates.first())
+                .expect("candidates")
+                .clone();
+            (f, true)
+        }
     };
+    let scroll_speed = SCROLL_PX_PER_S.max(SCROLL_CHARS_PER_S * font.text_width("0") as f32);
 
     let scale = icon_scale(font.line_height());
     let icon_px = IconWidget::pixel_size(scale);
@@ -104,10 +123,7 @@ pub fn scene(cfg: &NotificationsConfig, width: u32, height: u32, notice: &Inline
     zones.push(Zone::new(
         Rect::new(text_x, 0, text_w, height),
         None,
-        Box::new(text_widget(
-            &notice.text,
-            scrolls.then_some(SCROLL_PX_PER_S),
-        )),
+        Box::new(text_widget(&notice.text, scrolls.then_some(scroll_speed))),
     ));
     Scene::from_zones("notification", zones)
 }
