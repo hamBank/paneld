@@ -971,3 +971,91 @@ fn prometheus_source_defaults_and_validation() {
         assert!(e.contains(msg), "{msg}: {e}");
     }
 }
+
+#[test]
+fn http_api_settings() {
+    let cfg = Config::parse(MINIMAL).unwrap();
+    assert_eq!(cfg.http.token_env, None);
+    assert_eq!(cfg.http.data_prefix, "push");
+
+    let cfg = Config::parse(&format!(
+        "{MINIMAL}[http]\ntoken_env = \"PANELD_API_TOKEN\"\ndata_prefix = \"my-push_1\"\n"
+    ))
+    .unwrap();
+    assert_eq!(cfg.http.token_env.as_deref(), Some("PANELD_API_TOKEN"));
+
+    // A pasted token is rejected without being echoed.
+    let e = err(&format!("{MINIMAL}[http]\ntoken_env = \"abc def.123\"\n"));
+    assert!(e.contains("NAME of an environment variable"), "{e}");
+    assert!(!e.contains("abc def"), "{e}");
+    let e = err(&format!("{MINIMAL}[http]\ndata_prefix = \"a:b\"\n"));
+    assert!(e.contains("data_prefix"), "{e}");
+    let e = err(&format!("{MINIMAL}[http]\ndata_prefix = \"\"\n"));
+    assert!(e.contains("data_prefix"), "{e}");
+}
+
+#[test]
+fn data_prefix_must_not_collide_with_sources() {
+    let ha = "[sources.home]\ntype = \"home_assistant\"\nurl = \"ws://x\"\ntoken_env = \"T\"\n";
+    for (extra, prefix) in [
+        ("[sources.push]\ntype = \"static\"\nvalues = {}\n", "push"),
+        (ha, "ha"),
+        (ha, "home"),
+        (
+            "[sources.s]\ntype = \"static\"\nvalues = { \"push:x\" = 1 }\n",
+            "push",
+        ),
+        (
+            "[sources.p]\ntype = \"http_poll\"\nurl = \"https://e.com/\"\nextract = { \"w:t\" = \"$.t\" }\n",
+            "w",
+        ),
+        (
+            "[sources.q]\ntype = \"prometheus\"\nurl = \"http://p:9090\"\nqueries = { \"prom:up\" = \"up\" }\n",
+            "prom",
+        ),
+    ] {
+        let e = err(&format!(
+            "{MINIMAL}{extra}[http]\ndata_prefix = \"{prefix}\"\n"
+        ));
+        assert!(e.contains("also used by a source"), "{prefix}: {e}");
+    }
+    // The default prefix collides with a `push` source too.
+    let e = err(&format!(
+        "{MINIMAL}[sources.push]\ntype = \"static\"\nvalues = {{}}\n"
+    ));
+    assert!(e.contains("also used by a source"), "{e}");
+    // A different prefix is fine.
+    Config::parse(&format!(
+        "{MINIMAL}[sources.push]\ntype = \"static\"\nvalues = {{}}\n[http]\ndata_prefix = \"api\"\n"
+    ))
+    .unwrap();
+}
+
+#[test]
+fn notifications_config_defaults_parses_and_validates() {
+    let cfg = Config::parse(MINIMAL).unwrap();
+    assert_eq!(cfg.notifications.font, None);
+    assert_eq!(cfg.notifications.font_scale, None);
+    assert_eq!(cfg.notifications.background.to_string(), "#000000");
+
+    let cfg = Config::parse(&format!(
+        "[notifications]\nfont = \"9x15\"\nfont_scale = 2\nbackground = \"#101010\"\n{MINIMAL}"
+    ))
+    .unwrap();
+    assert_eq!(cfg.notifications.font.as_deref(), Some("9x15"));
+    assert_eq!(cfg.notifications.font_scale, Some(2));
+
+    let e = err(&format!(
+        "[notifications]\nfont = \"nope\"\nfont_scale = 9\n{MINIMAL}"
+    ));
+    assert!(
+        e.contains("notifications.font: unknown font \"nope\""),
+        "{e}"
+    );
+    assert!(
+        e.contains("notifications.font_scale: must be 1..=8 (got 9)"),
+        "{e}"
+    );
+    let e = err(&format!("[notifications]\nbogus = 1\n{MINIMAL}"));
+    assert!(e.contains("bogus"), "{e}");
+}

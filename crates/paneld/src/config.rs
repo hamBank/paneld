@@ -42,6 +42,15 @@ pub struct Config {
     pub http: HttpConfig,
     #[serde(default)]
     pub playlist: PlaylistConfig,
+    /// Dim level during a daily window (DESIGN.md §5.2).
+    #[serde(default)]
+    pub quiet_hours: Option<crate::autodim::QuietHoursConfig>,
+    /// Sun- and lux-driven auto-dim (DESIGN.md §5.2).
+    #[serde(default)]
+    pub auto_dim: Option<crate::autodim::AutoDimConfig>,
+    /// Look of inline notifications (DESIGN.md §5.5).
+    #[serde(default)]
+    pub notifications: NotificationsConfig,
     /// BDF fonts, usable by name from any text, clock or value widget.
     #[serde(default, rename = "font")]
     pub fonts: Vec<FontConfig>,
@@ -52,6 +61,11 @@ pub struct Config {
     /// source (`ha:`, `aircraft:`, `demo:`).
     #[serde(default)]
     pub sources: std::collections::BTreeMap<String, SourceConfig>,
+    /// MQTT connection for the Home Assistant entities (`mqtt_ha.rs`,
+    /// DESIGN.md §7.2). Absent: the feature is off. Separate from `type =
+    /// "mqtt"` sources, which only read topics.
+    #[serde(default)]
+    pub mqtt: Option<MqttConfig>,
     /// Directory relative media and font paths are resolved against: the config file's
     /// directory for [`Config::load`], the working directory for
     /// [`Config::parse`].
@@ -196,6 +210,37 @@ fn default_prom_interval_s() -> f64 {
 }
 fn default_http_timeout_s() -> f64 {
     10.0
+}
+
+/// Top-level `[mqtt]`: publish Home Assistant discovery entities and accept
+/// commands (`mqtt_ha.rs`). The password is never in the config:
+/// `password_env` names the environment variable that holds it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MqttConfig {
+    pub host: String,
+    #[serde(default = "default_mqtt_port")]
+    pub port: u16,
+    pub username: Option<String>,
+    /// Name of the environment variable holding the password (needs `username`).
+    pub password_env: Option<String>,
+    /// Home Assistant's discovery prefix.
+    #[serde(default = "default_discovery_prefix")]
+    pub discovery_prefix: String,
+    /// Identifies this paneld to HA (device identifier, unique ids, client
+    /// id). Letters, digits, `_` and `-`.
+    #[serde(default = "default_node_id")]
+    pub node_id: String,
+    /// Prefix of the state, command, availability and notify topics.
+    /// Default `paneld/<node_id>`.
+    pub base_topic: Option<String>,
+}
+
+fn default_discovery_prefix() -> String {
+    "homeassistant".into()
+}
+fn default_node_id() -> String {
+    "paneld".into()
 }
 
 /// `type = "mqtt"`. The password is never in the config: `password_env`
@@ -448,6 +493,42 @@ impl PlaylistConfig {
     }
 }
 
+/// How inline (text/icon) notifications look. Scene notifications use the
+/// scene's own zones and ignore this.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NotificationsConfig {
+    /// Font for the text: a built-in or `[[font]]` name. Unset = pick the
+    /// largest built-in font that fits.
+    #[serde(default)]
+    pub font: Option<String>,
+    /// Integer scale 1..=8. Unset = the largest scale at which the text fits
+    /// the canvas width (scale 1 and scrolling if none does).
+    #[serde(default)]
+    pub font_scale: Option<u32>,
+    /// Background colour. Default black.
+    #[serde(default = "default_notification_background")]
+    pub background: Color,
+    /// Resolved `font`, filled in by [`Config::load_fonts`].
+    #[serde(skip)]
+    pub face: Option<FontFace>,
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        NotificationsConfig {
+            font: None,
+            font_scale: None,
+            background: default_notification_background(),
+            face: None,
+        }
+    }
+}
+
+fn default_notification_background() -> Color {
+    Color::BLACK
+}
+
 fn default_scene_duration_s() -> f64 {
     DEFAULT_SCENE_DURATION_S
 }
@@ -640,14 +721,29 @@ fn default_scale() -> u32 {
 pub struct HttpConfig {
     #[serde(default = "default_bind")]
     pub bind: SocketAddr,
+    /// NAME of an environment variable holding the bearer token every
+    /// `/api/*` request must present. Unset: the API is open. `/preview*`
+    /// is never authenticated.
+    #[serde(default)]
+    pub token_env: Option<String>,
+    /// Namespace for `POST /api/data/{key}`: pushed keys must look like
+    /// `<data_prefix>:<name>`. It must not be used by any source.
+    #[serde(default = "default_data_prefix")]
+    pub data_prefix: String,
 }
 
 impl Default for HttpConfig {
     fn default() -> Self {
         HttpConfig {
             bind: default_bind(),
+            token_env: None,
+            data_prefix: default_data_prefix(),
         }
     }
+}
+
+fn default_data_prefix() -> String {
+    "push".into()
 }
 
 fn default_bind() -> SocketAddr {
@@ -969,6 +1065,36 @@ impl Config {
         Ok((cfg, text))
     }
 
+    /// Every store-key prefix (the part before `:`) that a configured source
+    /// writes under: each source's name, `ha` for Home Assistant (which
+    /// always writes `ha:` keys) and the prefixes of keys named explicitly
+    /// in `static`, `mqtt`, `http_poll` and `prometheus` sources.
+    pub fn source_key_prefixes(&self) -> std::collections::BTreeSet<String> {
+        let mut out: std::collections::BTreeSet<String> = self.sources.keys().cloned().collect();
+        let mut explicit: Vec<&String> = Vec::new();
+        for src in self.sources.values() {
+            match src {
+                SourceConfig::Static(c) => explicit.extend(c.values.keys()),
+                SourceConfig::Mqtt(c) => explicit.extend(c.topics.keys()),
+                SourceConfig::HttpPoll(c) => explicit.extend(c.extract.keys()),
+                SourceConfig::Prometheus(c) => {
+                    explicit.extend(c.queries.keys());
+                    explicit.extend(c.range_queries.keys());
+                }
+                SourceConfig::HomeAssistant(_) => {
+                    out.insert("ha".to_owned());
+                }
+                SourceConfig::Aircraft(_) => {}
+            }
+        }
+        out.extend(
+            explicit
+                .into_iter()
+                .filter_map(|k| k.split_once(':').map(|(p, _)| p.to_owned())),
+        );
+        out
+    }
+
     /// Parse and validate config text. Relative media paths resolve against
     /// the working directory; use [`Config::load`] or [`Config::parse_in`] to
     /// anchor them elsewhere.
@@ -1027,6 +1153,7 @@ impl Config {
                 .map(|b| FontFace::Bdf(Arc::clone(b)))
                 .or_else(|| FontFace::builtin(name))
         };
+        self.notifications.face = self.notifications.font.as_deref().and_then(resolve);
         for s in &mut self.scenes {
             for z in &mut s.zones {
                 match &mut z.widget {
@@ -1131,6 +1258,14 @@ impl Config {
             errs.push(format!("canvas.fps: must be 1..={MAX_FPS} (got {})", c.fps));
         }
 
+        errs.extend(crate::autodim::validate(
+            self.quiet_hours.as_ref(),
+            self.auto_dim.as_ref(),
+        ));
+        if let Some(m) = &self.mqtt {
+            crate::mqtt_ha::validate(m, "[mqtt]", &mut errs);
+        }
+
         let mut previews = 0;
         let mut interfaces: Vec<(&str, usize)> = Vec::new();
         for (i, o) in self.outputs.iter().enumerate() {
@@ -1203,8 +1338,54 @@ impl Config {
             }
         }
 
+        if let Some(name) = &self.notifications.font {
+            if fonts::lookup(name).is_none() && !font_names.contains(&name.as_str()) {
+                errs.push(format!(
+                    "notifications.font: unknown font {name:?} (known: {})",
+                    fonts::known_names(&font_names)
+                ));
+            }
+        }
+        if let Some(s) = self.notifications.font_scale {
+            if !(1..=fonts::MAX_FONT_SCALE).contains(&s) {
+                errs.push(format!(
+                    "notifications.font_scale: must be 1..={} (got {s})",
+                    fonts::MAX_FONT_SCALE
+                ));
+            }
+        }
+
         if self.scenes.is_empty() {
             errs.push("at least one [[scene]] is required".into());
+        }
+        if let Some(var) = &self.http.token_env {
+            let ok = !var.is_empty()
+                && var.len() <= 64
+                && !var.starts_with(|ch: char| ch.is_ascii_digit())
+                && var
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+            if !ok {
+                errs.push(
+                    "http.token_env must be the NAME of an environment variable (letters, digits and '_', e.g. \"PANELD_API_TOKEN\"), not the token itself"
+                        .into(),
+                );
+            }
+        }
+        let prefix = &self.http.data_prefix;
+        if prefix.is_empty()
+            || !prefix
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        {
+            errs.push(
+                "http.data_prefix may only use letters, digits, '_' and '-' and must not be empty"
+                    .into(),
+            );
+        } else if self.source_key_prefixes().contains(prefix) {
+            errs.push(format!(
+                "http.data_prefix {prefix:?} is also used by a source; pick another so pushed values cannot collide with source keys"
+            ));
         }
         let mut names = HashSet::new();
         for (name, src) in &self.sources {

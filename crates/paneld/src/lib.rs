@@ -5,18 +5,24 @@
 //! renderer with the `clock` and `text` widgets, the render loop and the
 //! HTTP preview sink.
 
+pub mod api;
+pub mod autodim;
 pub mod bdf;
 pub mod canvas;
 pub mod color;
 pub mod colorlight_sink;
 pub mod condition;
 pub mod config;
+pub mod control;
 pub mod engine;
 pub mod extract;
 pub mod fonts;
 pub mod format;
 pub mod icons;
+pub mod inline;
 pub mod media;
+pub mod mqtt_ha;
+pub mod notifications;
 pub mod png_io;
 pub mod postprocess;
 pub mod preview;
@@ -27,6 +33,8 @@ pub mod scheduler;
 pub mod sources;
 pub mod store;
 pub mod template;
+#[cfg(test)]
+mod test_broker;
 pub mod test_pattern;
 pub mod tls;
 pub mod widgets;

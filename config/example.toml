@@ -117,6 +117,47 @@ grid = true
 
 [http]
 bind = "127.0.0.1:8080"
+# Require `Authorization: Bearer <token>` on every /api/* route. NAME of an env
+# var holding the token; paneld refuses to start if it is unset or empty.
+# /preview* stays open. Without it the API is open: keep bind on loopback.
+# token_env = "PANELD_API_TOKEN"
+# Keys pushed with POST /api/data/<prefix>:<name> (must differ from every source prefix).
+# data_prefix = "push"
+
+# Quiet hours: dim level 0-255 inside a daily local-time window (may wrap
+# midnight). Auto-dim = the minimum of everything configured. All need a restart.
+# [quiet_hours]
+# start = "22:00"
+# end = "06:30"
+# brightness = 20
+
+# Dim after dusk (ramp_min minutes after sunset and before sunrise).
+# Coordinates here are the Royal Observatory, Greenwich; use your own.
+# [auto_dim.sun]
+# location = { lat = 51.4769, lon = -0.0005 }
+# night = 40
+# ramp_min = 30
+
+# Dim from a lux sensor in the store; readings older than stale_after_s are
+# ignored (the schedule above then decides).
+# [auto_dim.lux]
+# key = "ha:sensor.lux"
+# curve = [[0, 20], [50, 120], [400, 255]]    # [lux, dim], linear in between
+# stale_after_s = 600
+
+# Home Assistant over MQTT (DESIGN.md §7.2): paneld shows up as one device
+# with a light (on/off, brightness), a scene select, a message text box, a
+# card binary sensor (only with a colorlight output) and an fps sensor.
+# Off unless this section exists. Needs a restart to change. Separate from
+# `type = "mqtt"` sources, which only read topics. Plain TCP, no TLS.
+# [mqtt]
+# host = "homeassistant.local"
+# port = 1883                       # default
+# username = "paneld"
+# password_env = "PANELD_MQTT_PASSWORD"   # NAME of the env var holding the password (needs username)
+# discovery_prefix = "homeassistant"      # default; must match HA's MQTT discovery prefix
+# node_id = "paneld"                      # default; letters, digits, _ and -; unique per panel
+# base_topic = "paneld/paneld"            # default paneld/<node_id>
 
 # BDF fonts, usable as `font = "name"` in any text, clock or value widget.
 # `path` is relative to this file and is read when the config loads, so a
@@ -128,6 +169,12 @@ path = "../assets/fonts/spleen-32x64.bdf"
 [[font]]
 name = "spleen-16x32"
 path = "../assets/fonts/spleen-16x32.bdf"
+
+# Inline notifications (text/icon alerts) are drawn full-screen. All optional.
+# [notifications]
+# font = "spleen-16x32"   # default: the largest built-in font that fits
+# font_scale = 1          # 1..=8; default: the largest scale that fits
+# background = "#000000"
 
 # Scenes rotate in the order listed below.
 [playlist]

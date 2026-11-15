@@ -151,6 +151,13 @@ Applied per sink (so the preview can show "true" colours while the panel gets co
 - All of the above are combined into one 256-entry LUT per channel (`postprocess.rs`; order: gamma, white point, brightness, one rounding)
 - Auto-dim: schedule-based (sunset/sunrise, quiet hours) or driven by a HA lux sensor entity
 
+**As built (M4, `autodim.rs`, `colorlight_sink.rs`):**
+- **Sinks follow `OutputLevel` live.** Each colorlight sink holds a `watch::Receiver<OutputLevel>` and reads it once per frame (it also wakes on a level change, so a dim change shows without waiting for a new frame). `BrightnessPlan::apply` turns the level into the sink's settings: hardware mode puts `level.scale(brightness)` into both the `0x0A` and `0x01` frames and leaves the LUT at gamma and white point; software mode keeps the card at 255 and rebuilds the LUT with that brightness (only when the level changes, never per frame). Off means black pixels and card brightness 0 in both modes; frames keep being sent so the card never shows a stale image. The preview stays true colour: it shows content, not brightness.
+- **Auto-dim task** (`autodim::run`) evaluates every 30 s (every 5 s when a lux sensor is configured; the store has no change notification, so polling the snapshot is the cheap option) and sends `Command::SetDim` only when the value changes. Local time is `chrono::Local`; the logic takes the time as an argument so tests inject it. Config changes need a restart.
+- **Inputs** (`[quiet_hours]`, `[auto_dim.sun]`, `[auto_dim.lux]`, see section 8): quiet hours give a fixed dim level inside a window that may wrap midnight; sun gives 255 by day and `night` after dusk with a linear ramp of `ramp_min` after sunset and before sunrise (polar day: 255, polar night: `night`); lux maps a store value through a piecewise-linear curve and is ignored when missing or older than `stale_after_s`.
+- **Combination:** the dim level is the minimum of the inputs that apply (255 if none), so a stale or missing lux sensor falls back to the schedule inputs.
+- **Sun times** are NOAA's general solar position equations (fractional year, equation of time, declination, hour angle for zenith 90.833 degrees; <https://gml.noaa.gov/grad/solcalc/solareqns.PDF>, from Meeus, *Astronomical Algorithms*), evaluated at the event time with one refinement pass. Tests check Greenwich and Sydney Observatory against US Naval Observatory data to within 2 minutes.
+
 ### 5.3 Data store
 - Map of `Key → Value` where `Value` is an enum: `Number(f64, unit)`, `Text`, `Bool`, `Image(Arc<Bitmap>)`, `Series(Arc<[(SystemTime, f64)]>)` (immutable, so a per-frame clone is one refcount bump; sources append with `StoreWriter::push_point`), `Json`.
 - `Bitmap` (`media.rs`) is our own small straight-alpha RGBA8 type instead of the `image` crate's `RgbaImage`: the `image` crate pulls in a large codec tree, and we only need PNG (the `png` crate we already use) and GIF (the `gif` crate). Widgets detect a new image by `Arc::ptr_eq`.
@@ -183,6 +190,14 @@ Applied per sink (so the preview can show "true" colours while the panel gets co
 - **Playlist**: ordered scenes with durations. Conditional scenes are skipped when their condition is false.
 - **Notifications**: priority queue. Each notification has priority, duration, optional repeat count, and either a scene ref or inline content (text/icon/colour). Higher priority interrupts the current one, then the playlist resumes **where it left off**.
 - As built in M2 (`scheduler.rs`, `condition.rs`): the scheduler is pure state driven by `tick(now: Instant, &StoreSnapshot)`, so tests inject time. It makes at most one switch per tick (a stalled render loop doesn't fast-forward the playlist), leaves a scene at once if its condition turns false, and returns `None` (black frame, logged once per transition) when nothing is eligible. Conditions are `key op literal`, bare `key` (truthy), `!`, `&&`, `||` and parentheses; a missing key or type mismatch makes a comparison false. `[playlist] default_duration_s` (default 10) is an addition to the §8 schema. `paneld run --scene X` plays a playlist of one.
+- **Notifications, as built (M4, `scheduler.rs` + `notifications.rs`).** The queue is part of the scheduler and uses the same injected clock:
+  - *Order:* highest priority first, FIFO among equals. A *strictly* higher priority interrupts the one showing; the interrupted one returns to the queue keeping its arrival order, its repeats and the **remaining time of the current repeat** (nothing is lost, and a scene notification's `scene_elapsed` continues).
+  - *Repeat* means "shown N times" **back-to-back** (`A` x3, then a later equal-priority `B`: `A A A B`), not interleaved with the playlist.
+  - *Playlist:* frozen while any notification shows; when the queue empties it resumes where it left off, same scene, remaining duration preserved. A **pinned scene is interrupted too** (notifications are alerts) and is shown again afterwards.
+  - `ClearNotifications` empties the queue and ends the current one. The queue holds at most 50; on overflow the lowest priority (newest among equals) waiting notification is dropped with a warning, never the one showing.
+  - A config reload keeps the queue; scene notifications whose scene disappeared are dropped.
+  - *Rendering:* a scene notification renders that scene with `scene_elapsed` from 0. Inline content is a one-off `Scene` (`inline.rs`) of ordinary text widgets plus a scaled icon: icon and text centred on a `background` (default black) in the notification's colour, in the largest font that fits the canvas width and height. Too wide even for the smallest font: it scrolls beside a fixed icon, in the largest font no taller than a sixth of the canvas height (about 28 px on 172 px, so roughly 9 characters are visible), at about 3 characters per second (at least 40 px/s). `[notifications]` in config (all optional): `font` (built-in or `[[font]]`; unset = auto over built-in fonts of 13 px height or more), `font_scale` (1..=8; unset = auto-fit), `background`.
+  - `Status.notifications` lists the showing one first, then the waiting ones in order; `Status.scene` is the notification's scene name, or `None` for inline content.
 - Manual override: pin a scene until released (via MQTT select / HTTP).
 - Transitions: none / cut first; slide/fade later.
 
@@ -327,16 +342,33 @@ A local source can poll every 1 s, since there is no external limit. Internally 
 
 ## 7. Control plane
 
+**Shared core (as built, `control.rs`).** Every control surface uses one cloneable `Control` handle: the HTTP API, the MQTT/HA entities and the auto-dim task. It covers three things:
+- **Commands** go over a std channel to the render loop, which applies them at the top of the next frame without blocking:
+  - `Notify`, `ClearNotifications`;
+  - `Pin(Some(name) | None)`;
+  - `SetPower`, `SetBrightness(0–255)`, and `SetDim(0–255)` from auto-dim.
+- **`Status`** comes back on a `watch` channel, re-published only when it changes, and is serialised as-is for `GET /api/state`. It holds the scenes, the scene on screen, the pin, the notification queue, on/off, brightness, dim and the actual fps.
+- **`OutputLevel { on, level }`** goes to the sinks on another `watch`:
+  - `level = brightness × dim / 255`, and each output's configured `brightness` is its calibrated maximum, scaled by `level / 255`;
+  - off means black, and hardware brightness 0 where the sink supports it.
+- **Notification requests** have the same JSON shape on HTTP and MQTT: `text` (with optional `icon` and `color`) or `scene`, plus `duration_s` (10), `priority` (0, ±100) and `repeat` (1). `NotifyRequest::validate` checks them against the configured scenes and icons.
+- **Pinning** is in the scheduler. A pinned scene shows regardless of its condition, while the playlist's own clock keeps running; notifications still interrupt it (§5.5). A pin survives config reloads by scene name, and is released if the scene disappears.
+
 ### 7.1 HTTP (axum)
-- `GET  /metrics`: Prometheus
-- `GET  /preview.png`: current frame (scaled ×N, optional pixel-grid look)
-- `GET  /preview`: tiny HTML page that refreshes / shows an MJPEG stream
-- `POST /api/notify`: `{ "text": "...", "icon": "...", "color": "#ff0000", "duration_s": 10, "priority": 5 }`
-- `POST /api/data/{key}`: push a value into the store
-- `POST /api/scene/{name}`: pin scene; `DELETE /api/scene`: release
-- `POST /api/brightness`: `{ "value": 0-255 }`
-- `GET  /api/state`: current scene, notification queue, card status
-- Bind address configurable; optional bearer token.
+- `GET  /metrics`: Prometheus (M5)
+- `GET  /preview.png`, `GET /preview`: current frame / tiny HTML page. Never authenticated.
+- `GET  /api/state`: current scene, pin, notification queue, on/off, brightness, dim, fps (200)
+- `POST /api/notify`: `{ "text": "...", "icon": "...", "color": "#ff0000", "duration_s": 10, "priority": 5 }` or `{ "scene": "..." }` (202; 400 on bad input); `DELETE /api/notify` clears all (202)
+- `POST /api/data/{key}`: push a value into the store (200; 400; 409)
+- `POST /api/scene/{name}`: pin scene (202; 404 unknown); `DELETE /api/scene`: release (202)
+- `POST /api/brightness`: `{ "value": 0-255 }` (202)
+- `POST /api/power`: `{ "on": bool }` (202). Added in M4 because HA's `light` entity needs on/off separately from brightness.
+- Bind address configurable.
+
+As built (`api.rs`):
+- **Errors** are always `{ "error": "..." }`: 400 (bad input), 401 (auth), 404, 409, 413 (body over 64 KiB), 503 (render loop gone). Bodies are parsed with `serde_json` from raw bytes instead of axum's `Json` extractor, so malformed JSON, unknown fields and a missing content type give clear 400s rather than axum's plain-text rejections.
+- **Auth:** optional `[http] token_env` (name of an env var). When set, every `/api/*` route needs `Authorization: Bearer <token>`, compared in constant time (hand-written, no crate); otherwise 401 with `WWW-Authenticate: Bearer`. A set but missing/empty variable fails `run` at start-up, naming the variable. `/preview*` and `/metrics` stay open (documented limitation; put a reverse proxy in front if that matters). An unauthenticated API on a non-loopback bind logs a warning. The token is a `Secret` (redacted `Debug`). `token_env` and `data_prefix` are restart-only.
+- **`POST /api/data/{key}` namespace (decision):** pushed keys must be `<data_prefix>:<name>` (`[http] data_prefix`, default `push`). Config validation rejects a `data_prefix` that any source uses (source names, `ha`, and prefixes of explicit keys in `static`/`mqtt`/`http_poll`/`prometheus`), so a push can never fight a source, including after a reload. Rationale: sources name their keys freely (`prom:x` under any source name), so "not a source's prefix" can only be decided against a dedicated namespace; a blocklist would break on every config change. As a second guard, a push never overwrites or removes a key whose entry was written by another source (409), and at most 1000 keys can be pushed (409). Values are stamped with source `http`. Body: number, string, bool, `null` (removes the key) or `{ "value": ..., "unit": "W" }`; via `extract::to_value`, so numeric strings become numbers. Arrays and objects are rejected.
 
 ### 7.2 MQTT + Home Assistant discovery
 Publish discovery configs so HA auto-creates one device with:
@@ -347,6 +379,26 @@ Publish discovery configs so HA auto-creates one device with:
 - `sensor.<name>_fps`: actual fps
 
 Also accept raw notification JSON on `<prefix>/notify` (same schema as HTTP). Use `rumqttc`. Availability topic + LWT.
+
+**As built (`mqtt_ha.rs`, formats checked against HA's docs: `mqtt_ha/HA_DISCOVERY.md`):**
+- **Config:** top-level `[mqtt]` (`host`, `port` 1883, `username`, `password_env`, `discovery_prefix` `homeassistant`, `node_id` `paneld`, `base_topic` default `paneld/<node_id>`, a private namespace per node so two panels never collide). Absent: off. `password_env` is part of the startup env check. Read at startup only (like `[http]`). Plain TCP, same as the MQTT source (§6.2).
+- **One tokio task** next to the HTTP server, reusing `ClientSettings`/`Password` from `sources/mqtt.rs`; reconnects with 1 s to 30 s backoff, and on shutdown publishes `offline` itself (a clean DISCONNECT does not fire the will) before disconnecting.
+- **Topics** (`B` = base, `P` = prefix, `N` = node id; QoS 0, state and configs retained):
+
+| Entity | Config | State | Command |
+|---|---|---|---|
+| `light.paneld` (JSON schema, `brightness_scale` 255) | `P/light/N/light/config` | `B/light/state` `{"state","brightness","color_mode"}` | `B/light/set` |
+| `select.paneld_scene` | `P/select/N/scene/config` | `B/scene/state` (pin or `auto`) | `B/scene/set` |
+| `text.paneld_message` | `P/text/N/message/config` | none | `B/message/set` |
+| `binary_sensor.paneld_card` | `P/binary_sensor/N/card/config` | `B/card/state` `ON`/`OFF` | none |
+| `sensor.paneld_fps` | `P/sensor/N/fps/config` | `B/fps/state` | none |
+
+  Also `B/availability` (`online`/`offline`, retained; last will `offline`, QoS 1, retained), `B/notify` (raw `NotifyRequest` JSON, validated like HTTP; invalid ones are logged at warn and dropped) and `P/status` (HA's birth message).
+- **Commands:** light `{"state": "ON"|"OFF", "brightness": 0-255}` becomes `SetBrightness` then `SetPower`; select becomes `Pin(Some(scene))` or `Pin(None)` for `auto` (unknown names are ignored); text becomes a `Notify` with the default duration, priority and repeat; `B/notify` becomes `Notify`.
+- **Light brightness is the user brightness** (`Status.brightness`), not the effective level after auto-dim, so HA's slider shows what it set and does not move when the schedule dims the panel.
+- **Republish:** availability, all configs and all states on every ConnAck and when HA publishes `online` on the birth topic; the select config again whenever `Status.scenes` changes (reload); states only when they change, driven by `Control::subscribe()`. FPS is published when it moves by more than 1 or changes after 10 s. With no Colorlight output the card config is replaced by an empty retained payload, which removes a stale entity.
+- **Card:** sampled every 5 s from `SinkStats` (`main` passes them in): ON when every sink sent frames since the last sample and none had a send error.
+- A scene literally named `auto` is shadowed by the `auto` option.
 
 ### 7.3 Config hot reload
 Watch the config file. On change: parse + validate fully, build the new scenes and playlist (including image decoding and `Widget::prepare`) off the render thread, then hand the prepared set to the render loop, which swaps it in atomically with a non-blocking check at the top of a frame. Sources whose config changed get restarted, others keep running (see §6, "Hot reload", for how "changed" is decided, what happens to a removed source's keys and the environment-variable check). On error: log, keep the old config, count `config_reload_errors_total` (`ReloadStats::reload_errors`; exported as `paneld_config_reload_errors_total` in M5).
@@ -449,7 +501,17 @@ condition = "prom:house_power > 0"
 [quiet_hours]
 start = "22:00"
 end = "06:30"
-brightness = 20
+brightness = 20          # dim level 0-255 inside the window (wraps midnight)
+
+# Optional, see section 5.2:
+# [auto_dim.sun]
+# location = { lat = 51.4769, lon = -0.0005 }
+# night = 40
+# ramp_min = 30
+# [auto_dim.lux]
+# key = "ha:sensor.lux"
+# curve = [[0, 20], [50, 120], [400, 255]]
+# stale_after_s = 600
 ```
 
 Secrets only via env vars (`*_env` keys). Never commit tokens.

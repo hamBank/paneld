@@ -18,7 +18,25 @@ pub struct Scene {
     zones: Vec<Zone>,
 }
 
+impl Zone {
+    pub fn new(rect: Rect, background: Option<Rgb888>, widget: Box<dyn Widget>) -> Self {
+        Zone {
+            rect,
+            background,
+            widget,
+        }
+    }
+}
+
 impl Scene {
+    /// A scene made of ready-built zones (inline notifications).
+    pub fn from_zones(name: &str, zones: Vec<Zone>) -> Self {
+        Scene {
+            name: name.to_owned(),
+            zones,
+        }
+    }
+
     pub fn from_config(cfg: &SceneConfig) -> Self {
         Scene {
             name: cfg.name.clone(),

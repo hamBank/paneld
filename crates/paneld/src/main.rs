@@ -240,7 +240,10 @@ fn send_pattern(
 ) -> anyhow::Result<()> {
     let (tx, rx) = frame_channel(a.width, a.height);
     let settings = SinkSettings::from_output(output, a.width, a.height);
-    let sink = colorlight_sink::spawn(settings, rx).context("starting the colorlight sink")?;
+    // Test patterns always run at full level.
+    let (_level_tx, level_rx) = tokio::sync::watch::channel(paneld::control::OutputLevel::FULL);
+    let sink =
+        colorlight_sink::spawn(settings, rx, level_rx).context("starting the colorlight sink")?;
     println!(
         "sending to {} at {fps} fps, brightness {}, gamma {}, colour order {:?}; Ctrl-C to stop",
         output.interface, output.brightness, output.gamma, output.color_order
@@ -368,6 +371,9 @@ fn main() -> anyhow::Result<()> {
 fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
     let (cfg, loaded_text) = Config::load_with_text(&config_path)?;
     paneld::sources::check_environment(&cfg)?;
+    let api_settings =
+        paneld::api::ApiSettings::from_config(&cfg.http).map_err(anyhow::Error::msg)?;
+    paneld::mqtt_ha::check_environment(&cfg)?;
     let (tx, rx) = frame_channel(cfg.canvas.width, cfg.canvas.height);
     let (reload_tx, reload_rx) = std::sync::mpsc::channel();
     let reload_ctx =
@@ -375,8 +381,13 @@ fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
     let reload_stats = std::sync::Arc::new(reload::ReloadStats::default());
     paneld::tls::init();
     let store = Store::new();
+    // Control plane (M4): one handle for every control surface; the output
+    // level (on/off, brightness) is for the sinks.
+    let (control, control_link, output_level) =
+        paneld::control::channel(cfg.scenes.iter().map(|s| s.name.clone()).collect());
     let render = RenderLoop::from_config(&cfg, scene.as_deref(), store.clone())?
         .with_reload(reload_rx)
+        .with_control(control_link)
         .spawn(tx)
         .context("starting render thread")?;
 
@@ -389,12 +400,12 @@ fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
         })
         .map(|cl| {
             let settings = SinkSettings::from_output(cl, cfg.canvas.width, cfg.canvas.height);
-            colorlight_sink::spawn(settings, rx.clone())
+            colorlight_sink::spawn(settings, rx.clone(), output_level.clone())
                 .with_context(|| format!("starting colorlight sink on {}", cl.interface))
         })
         .collect::<anyhow::Result<_>>()?;
 
-    let mut app = Router::new();
+    let mut app = Router::new().merge(paneld::api::router(control.clone(), &store, api_settings));
     if let Some(p) = cfg.preview() {
         app = app.merge(preview::router(
             rx,
@@ -412,6 +423,12 @@ fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
         let sources = std::sync::Arc::new(tokio::sync::Mutex::new(
             paneld::sources::Supervisor::start(&cfg, &store),
         ));
+        // Quiet hours / auto-dim (changes need a restart).
+        tokio::spawn(paneld::autodim::run(
+            paneld::autodim::AutoDim::new(cfg.quiet_hours.clone(), cfg.auto_dim.clone()),
+            store.clone(),
+            control.clone(),
+        ));
         reload::spawn(
             reload_ctx,
             reload_tx,
@@ -421,6 +438,18 @@ fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
                 store: store.clone(),
             }),
         );
+        // Home Assistant entities over MQTT (§7.2); off without `[mqtt]`.
+        let (ha_stop, ha_rx) = tokio::sync::watch::channel(false);
+        let ha_task = match &cfg.mqtt {
+            Some(m) => {
+                let card = paneld::mqtt_ha::CardMonitor::new(
+                    sinks.iter().map(|s| s.stats.clone()).collect(),
+                );
+                let ha = paneld::mqtt_ha::HaMqtt::new(m)?;
+                Some(tokio::spawn(ha.run(control.clone(), card, ha_rx)))
+            }
+            None => None,
+        };
         tracing::info!(addr = %cfg.http.bind, "http listening");
         if cfg.preview().is_some() {
             tracing::info!("preview at http://{}/preview", cfg.http.bind);
@@ -429,6 +458,10 @@ fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
             .with_graceful_shutdown(shutdown_signal())
             .await
             .context("http server");
+        let _ = ha_stop.send(true);
+        if let Some(task) = ha_task {
+            let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+        }
         sources
             .lock()
             .await

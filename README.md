@@ -18,7 +18,7 @@ Architecture, config schema and roadmap are in [`DESIGN.md`](DESIGN.md).
 
 **M3 (data) is done:** data sources (`static`, `aircraft` via adsb.fi, `home_assistant`, `mqtt` (plain TCP), `http_poll`, `prometheus`) run under a supervisor and restart on failure. Hot reload restarts only the sources whose config changed. Text widgets take templates like `{ha:sensor.x:.1}°C`, and `value` widgets can map weather conditions to icons.
 
-Next: control API, MQTT discovery, notifications and quiet hours (M4). See `DESIGN.md` §14.
+Next: control API, MQTT discovery and notifications (M4); quiet hours and auto-dim are in. See `DESIGN.md` §14.
 
 ## Hardware
 
@@ -64,7 +64,8 @@ See [`config/example.toml`](config/example.toml). Unknown keys are rejected, and
 | `[canvas]` | `width`, `height`, `fps` (1–60, default 30) |
 | `[[output]]` | `type = "preview"`, `scale` (1–32, default 8), `grid` (default false) |
 | `[[output]]` | `type = "colorlight"`, `interface` (required), `gamma` (1.0–4.0, default 2.2), `brightness` (0–255, default 255), `white_point` (`#rrggbb`, default `#ffffff`), `brightness_mode` (`hardware` default, or `software`), `color_order` (`rgb` default, `rbg`, `grb`, `gbr`, `brg`, `bgr`: what the three wire bytes carry; the right value depends on the panel), `firmware_major` (optional override if discovery fails), `sync_gap_us` (0–20000, default 500). One output per interface. The whole canvas goes to card origin (0,0); multi-region maps come in M6. |
-| `[http]` | `bind` (default `127.0.0.1:8080`) |
+| `[http]` | `bind` (default `127.0.0.1:8080`), `token_env` (optional NAME of an env var holding the API bearer token), `data_prefix` (default `push`; namespace for `POST /api/data`). See HTTP control API below. |
+| `[mqtt]` | optional, Home Assistant entities: `host`, `port` (1883), `username`, `password_env`, `discovery_prefix` (`homeassistant`), `node_id` (`paneld`), `base_topic` (`paneld/<node_id>`); see Home Assistant (MQTT) below |
 | `[playlist]` | `default_duration_s` (> 0, at most 86400, default 10): how long a scene is shown when it has no `duration_s` |
 | `[[font]]` | `name`, `path`: a BDF font file (path relative to the config file) usable as `font = "name"`; see Fonts below. Repeatable. |
 | `[[scene]]` | `name`, `duration_s` (optional, same range), `condition` (optional, see below), `[[scene.zone]]` with `rect = { x, y, w, h }`, `widget`, optional `background = "#rrggbb"` |
@@ -141,6 +142,24 @@ A `condition` is a small expression over store keys:
 
 Conditions are parsed when the config loads; errors name the scene and the expression.
 
+### Notifications
+
+A notification is a short-lived alert shown over everything else. It is queued through the control plane (`Command::Notify`; the HTTP and MQTT front ends are part of M4) with a priority, a duration per showing, a repeat count and either a configured scene or inline `text` (with optional `icon` and `color`).
+
+- The highest priority shows first; equal priorities go in arrival order. A strictly higher priority interrupts the one on screen, which goes back to the queue and later continues with the time it had left.
+- `repeat = N` shows it N times back-to-back.
+- While a notification shows, the playlist is frozen. When the queue is empty the playlist resumes on the same scene with the same time left. A pinned scene is interrupted too, and shown again afterwards.
+- Clearing empties the queue and ends the current notification. The queue holds 50; when full the lowest priority one is dropped (with a warning). A config reload keeps the queue and drops scene notifications whose scene is gone.
+- Inline notifications are drawn full-screen: icon and text centred in the given colour, in the largest font that fits. Text too wide even for the smallest font scrolls.
+
+```toml
+# All optional.
+[notifications]
+font = "spleen-16x32"   # a built-in or [[font]] name; default: the largest built-in font that fits
+font_scale = 1          # 1..=8; default: the largest scale that fits
+background = "#000000"
+```
+
 ### Data sources
 
 Sources (`[sources.<name>]`, each with a `type`) write store keys that widgets and conditions read. They run in the background and are restarted with backoff if they fail. The render loop never waits on them.
@@ -202,12 +221,89 @@ Payloads:
 
 The password is read from the environment variable named by `password_env` (`paneld run` refuses to start if it is not set) and is never logged. Subscriptions use QoS 0. If the broker drops, the last values stay and show as stale; the source reconnects with backoff (1 s to 30 s) and subscribes again. Changing the source config takes a restart.
 
+### HTTP control API
+
+All routes live on the `[http] bind` address. Errors are always `{ "error": "..." }`. Commands (202) are applied by the render loop at the start of the next frame; a dead render loop gives 503. Request bodies are capped at 64 KiB (413) and the content type is not checked.
+
+If `[http] token_env` names an environment variable, every `/api/*` request needs `Authorization: Bearer <token>` (401 with `WWW-Authenticate: Bearer` otherwise). `paneld run` refuses to start if that variable is unset or empty. `/preview*` (and the future `/metrics`) are **never** authenticated. Without a token the API is open; paneld warns at start-up if that is on a non-loopback address.
+
+```bash
+H=http://localhost:8080 ; A='Authorization: Bearer '$PANELD_API_TOKEN   # drop -H "$A" if no token
+curl -H "$A" $H/api/state                                                       # 200: scenes, scene, pinned, notifications, on, brightness, dim, fps
+curl -H "$A" -d '{"text":"Washing done","icon":"bolt","duration_s":10,"priority":5}' $H/api/notify   # 202; or {"scene":"alert"}
+curl -H "$A" -X DELETE $H/api/notify                                            # 202: clear all notifications
+curl -H "$A" -d '{"value":12.5,"unit":"W"}' $H/api/data/push:power              # 200: also 42, "text", true; null removes the key
+curl -H "$A" -X POST $H/api/scene/home                                          # 202 (404 for an unknown scene)
+curl -H "$A" -X DELETE $H/api/scene                                             # 202: release the pin
+curl -H "$A" -d '{"value":128}' $H/api/brightness                               # 202: 0-255
+curl -H "$A" -d '{"on":false}' $H/api/power                                     # 202: blank / restore
+```
+
+`POST /api/data/{key}` writes into the store under the source name `http`. Keys must be `<data_prefix>:<name>` (`[http] data_prefix`, default `push`; name: letters, digits, `_ . -`, at most 128). Config validation rejects a `data_prefix` that any source uses (source names, `ha`, or the prefix of an explicitly configured key), so pushes cannot collide with source data; a push also never overwrites a key another source wrote (409). At most 1000 pushed keys. Use them in scenes like any key: `{push:power:.0}`. Numeric strings become numbers; arrays and objects are rejected.
+
+### Brightness, quiet hours and auto-dim
+
+The panel's brightness is three numbers multiplied together:
+
+```
+card brightness = configured brightness (per output) x user brightness x auto-dim / 255 / 255
+```
+
+- **Configured** `brightness` on a `[[output]]` is that panel's calibrated maximum.
+- **User brightness** and on/off come from the control plane (HTTP API, Home Assistant). Off sends black with card brightness 0 (frames keep flowing).
+- **Auto-dim** (0-255, 255 = none) comes from the config below.
+
+With `brightness_mode = "hardware"` the result goes into the card's frames; with `"software"` the colour LUT is rebuilt when it changes. The preview always shows content in true colour, not the dimmed output.
+
+```toml
+[quiet_hours]                    # local time; the window may wrap midnight
+start = "22:00"
+end = "06:30"
+brightness = 20                  # dim level 0-255 inside the window
+
+# [auto_dim.sun]                 # dim after dusk, ramping over ramp_min minutes
+# location = { lat = 51.4769, lon = -0.0005 }   # Royal Observatory, Greenwich
+# night = 40
+# ramp_min = 30
+
+# [auto_dim.lux]                 # dim from a light sensor in the store
+# key = "ha:sensor.lux"
+# curve = [[0, 20], [50, 120], [400, 255]]       # [lux, dim], linear in between
+# stale_after_s = 600            # older readings are ignored
+```
+
+The dim level is the **minimum** of whatever is configured, so a stale or missing lux reading falls back to the schedule. It is re-evaluated every 30 s (5 s with a lux sensor) and only sent when it changes. Sunrise and sunset use NOAA's solar equations; at polar latitudes the sun may not rise (`night`) or set (no dimming). These settings need a restart.
+
+### Home Assistant (MQTT)
+
+Add a top-level `[mqtt]` section and paneld shows up in Home Assistant as one device named `paneld`, through MQTT discovery (HA's MQTT integration must be set up and use the same broker; plain TCP, no TLS). Without `[mqtt]` nothing connects.
+
+```toml
+[mqtt]
+host = "homeassistant.local"
+username = "paneld"
+password_env = "PANELD_MQTT_PASSWORD"   # NAME of the env var; never the password itself
+# discovery_prefix = "homeassistant"    # default
+# node_id = "paneld"                    # default; unique per panel
+# base_topic = "paneld/paneld"          # default paneld/<node_id>
+```
+
+| Entity | Does |
+|---|---|
+| `light.paneld` | on/off and brightness 0-255 (the user brightness; auto-dim is applied on top and not shown) |
+| `select.paneld_scene` | pin a scene, or `auto` to follow the playlist; the options follow config reloads |
+| `text.paneld_message` | typing a message shows it as a notification (10 s, priority 0) |
+| `binary_sensor.paneld_card` | connectivity of the Colorlight card: on while frames are being sent without errors (only with a colorlight output) |
+| `sensor.paneld_fps` | rendered frames per second (updated on a change over 1 fps, or at most every 10 s) |
+
+Raw notifications go to `<base_topic>/notify` as the JSON of `POST /api/notify` (for example `{"text": "Door open", "icon": "bolt", "priority": 5}`); invalid ones are logged and ignored. `<base_topic>/availability` is `online` while paneld runs and `offline` otherwise (it is the MQTT last will). Configs, states and availability are retained and are published again after every reconnect and when HA announces it is online. The `[mqtt]` section is read at startup; changing it needs a restart.
+
 ### Live reload
 
 `paneld run` picks up edits to the config file without a restart. The file is polled once a second; a change is applied once the file has had the same new content on two consecutive polls (so a half-written save is not parsed, and touching the file without changing it does nothing), which means a reload takes about two seconds. On unix, `kill -HUP <pid>` reloads immediately. Editors that save in place or by rename-and-replace both work. The new config is fully parsed, validated and prepared (including decoding images) off the render thread, then swapped in between two frames; the playlist restarts at its first eligible scene and widget state (scroll position, GIF frame) starts over.
 
 - **Applied live:** scenes, zones, widgets, conditions, the playlist and `duration_s`, and `[sources]`. Only the sources whose config changed are restarted; the others keep running. Adding, removing or editing a `[sources.<name>]` table acts on that source alone, and so does a scene edit that makes it read different entities (for Home Assistant: a scene that starts showing a new `ha:` entity restarts the Home Assistant source). A removed source's values are cleared. A restarted source's values stay on screen until it writes again; keys it no longer produces are then removed. If a changed or added source needs an environment variable that is not set (a token), it is not started, the old one keeps running, and the reload counts an error; the scene changes still apply.
-- **Needs a restart:** `canvas.fps`, `[http]`, and every `[[output]]` (the preview and the Colorlight settings gamma, brightness, white point, colour order, sync gap and interface). If these differ from the running values, a warning names them and the scene and playlist changes are still applied.
+- **Needs a restart:** `canvas.fps`, `[http]`, `[mqtt]`, `[quiet_hours]`, `[auto_dim]`, and every `[[output]]` (the preview and the Colorlight settings gamma, brightness, white point, colour order, sync gap and interface). If these differ from the running values, a warning names them and the scene and playlist changes are still applied.
 - **Rejected:** a changed `canvas` width or height, since scenes laid out for a new size would not fit the running canvas. Restart to resize.
 - **Errors never take the panel down.** A parse or validation error, an unreadable image, a canvas size change, or (with `run --scene X`) a config that no longer has scene `X` is logged with the full message, counted in `reload_errors`, and the old config keeps running. Fix the file and the next change is picked up. With `--scene X`, scene `X` stays on screen across reloads.
 - **Limitations:** image files referenced by the config are not watched; after replacing one, make any edit to the config or send SIGHUP.
