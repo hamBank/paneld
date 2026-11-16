@@ -799,6 +799,7 @@ pub enum WidgetConfig {
     Value(ValueConfig),
     Sparkline(SparklineConfig),
     Image(ImageConfig),
+    Video(VideoConfig),
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -983,6 +984,96 @@ pub struct ImageConfig {
     pub loaded: Option<Arc<Media>>,
 }
 
+/// A live video zone: a local file or a network stream (RTSP, HTTP), decoded
+/// by an `ffmpeg` subprocess (DESIGN.md §9).
+///
+/// Exactly one of `path` and `url_env`. The stream URL often carries
+/// credentials (`rtsp://user:pass@cam/stream`), so it is never in the config:
+/// `url_env` names the environment variable that holds it, and a literal
+/// `url` is rejected. The URL is read from the environment only when the
+/// widget is built ([`VideoConfig::input`]), so it appears in no `Debug`
+/// output of the config.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VideoConfig {
+    /// Video file, relative to the config file's directory. Must exist when
+    /// the config is loaded.
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+    /// NAME of the environment variable holding the stream URL.
+    #[serde(default)]
+    pub url_env: Option<String>,
+    /// Accepted only to give a helpful error: a literal URL is rejected by
+    /// validation. The value is discarded at parse time.
+    #[serde(default)]
+    pub url: Option<DiscardedString>,
+    #[serde(default)]
+    pub fit: Fit,
+    /// Frames per second the decoder delivers (1..=60). The video's own rate
+    /// is capped to this, never raised.
+    #[serde(default = "default_video_fps")]
+    pub fps: u32,
+    /// Files only: restart at the end (default) or hold the last frame.
+    #[serde(default = "default_true", rename = "loop")]
+    pub looping: bool,
+    /// The `ffmpeg` executable (default: `ffmpeg` from `PATH`).
+    #[serde(default)]
+    pub program: Option<PathBuf>,
+    /// `path` joined onto the config file's directory, filled in by
+    /// [`Config::resolve_video_paths`].
+    #[serde(skip)]
+    pub resolved_path: Option<PathBuf>,
+}
+
+/// Highest `fps` a video zone accepts.
+pub const MAX_VIDEO_FPS: u32 = 60;
+
+fn default_video_fps() -> u32 {
+    15
+}
+
+/// A string that is read and thrown away (so a rejected `url = "..."` can
+/// never reach an error message or a `Debug` print).
+#[derive(Clone, PartialEq, Eq)]
+pub struct DiscardedString;
+
+impl fmt::Debug for DiscardedString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<discarded>")
+    }
+}
+
+impl<'de> Deserialize<'de> for DiscardedString {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        String::deserialize(d).map(|_| DiscardedString)
+    }
+}
+
+impl VideoConfig {
+    /// Where the video comes from, with the stream URL read from its
+    /// environment variable now. The error names the variable, never a value.
+    pub fn input(&self) -> Result<VideoInput, String> {
+        match (&self.path, &self.url_env) {
+            (_, Some(var)) => crate::sources::ha::read_secret(
+                var,
+                "the video stream URL (e.g. rtsp://user:pass@host/stream)",
+            )
+            .map(VideoInput::Url),
+            (Some(p), None) => Ok(VideoInput::File(
+                self.resolved_path.clone().unwrap_or_else(|| p.clone()),
+            )),
+            (None, None) => Err("neither path nor url_env is set".into()),
+        }
+    }
+}
+
+/// A [`VideoConfig`] source with its URL resolved. `Debug` redacts the URL.
+#[derive(Debug, Clone)]
+pub enum VideoInput {
+    File(PathBuf),
+    Url(crate::sources::ha::Secret),
+}
+
 fn default_true() -> bool {
     true
 }
@@ -1127,6 +1218,7 @@ impl Config {
         let mut errs = cfg.validate().err().map(|e| e.0).unwrap_or_default();
         errs.extend(cfg.load_fonts());
         errs.extend(cfg.load_media());
+        cfg.resolve_video_paths();
         if errs.is_empty() {
             Ok(cfg)
         } else {
@@ -1213,6 +1305,67 @@ impl Config {
         errs
     }
 
+    /// Fill in each `video` widget's `resolved_path` (`path` relative to the
+    /// config file's directory). No I/O; existence is checked by validation.
+    pub fn resolve_video_paths(&mut self) {
+        for s in &mut self.scenes {
+            for z in &mut s.zones {
+                if let WidgetConfig::Video(v) = &mut z.widget {
+                    v.resolved_path = v.path.as_ref().map(|p| self.base_dir.join(p));
+                }
+            }
+        }
+    }
+
+    /// Fail early, at `run` start and before a reload swaps scenes in, when a
+    /// `video` widget's `url_env` variable is unset or empty. Names the scene,
+    /// zone and variable, never a value.
+    pub fn check_video_environment(&self) -> anyhow::Result<()> {
+        for s in &self.scenes {
+            for (i, z) in s.zones.iter().enumerate() {
+                if let WidgetConfig::Video(v) = &z.widget {
+                    v.input()
+                        .map_err(|e| anyhow::anyhow!("scene {:?} zone[{i}] video: {e}", s.name))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Non-fatal problems with `video` widgets, for `paneld check`: the
+    /// `ffmpeg` program is not found, or a `url_env` variable is not set in
+    /// this shell. Warnings, not errors: `check` often runs on another
+    /// machine or shell than the service (whose variables come from
+    /// `/etc/paneld/env`); `run` enforces the variables.
+    pub fn video_warnings(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut programs = std::collections::BTreeSet::new();
+        for s in &self.scenes {
+            for (i, z) in s.zones.iter().enumerate() {
+                let WidgetConfig::Video(v) = &z.widget else {
+                    continue;
+                };
+                let prog = v.program.clone().unwrap_or_else(|| "ffmpeg".into());
+                if programs.insert(prog.clone()) && !program_exists(&prog) {
+                    out.push(format!(
+                        "scene {:?} zone[{i}] video: {} not found; video zones stay black until it is installed (sudo apt install ffmpeg)",
+                        s.name,
+                        prog.display()
+                    ));
+                }
+                if let Some(var) = &v.url_env {
+                    if v.input().is_err() {
+                        out.push(format!(
+                            "scene {:?} zone[{i}] video: environment variable {var} is not set in this shell (paneld run refuses to start without it)",
+                            s.name
+                        ));
+                    }
+                }
+            }
+        }
+        out
+    }
+
     pub fn scene(&self, name: &str) -> Option<&SceneConfig> {
         self.scenes.iter().find(|s| s.name == name)
     }
@@ -1252,7 +1405,7 @@ impl Config {
                             keys.extend(t.keys().map(str::to_owned));
                         }
                     }
-                    WidgetConfig::Clock(_) => {}
+                    WidgetConfig::Clock(_) | WidgetConfig::Video(_) => {}
                 }
             }
         }
@@ -1381,12 +1534,7 @@ impl Config {
             errs.push("at least one [[scene]] is required".into());
         }
         if let Some(var) = &self.http.token_env {
-            let ok = !var.is_empty()
-                && var.len() <= 64
-                && !var.starts_with(|ch: char| ch.is_ascii_digit())
-                && var
-                    .chars()
-                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+            let ok = valid_env_name(var);
             if !ok {
                 errs.push(
                     "http.token_env must be the NAME of an environment variable (letters, digits and '_', e.g. \"PANELD_API_TOKEN\"), not the token itself"
@@ -1518,7 +1666,7 @@ impl Config {
                         r.x, r.y, r.w, r.h, c.width, c.height
                     ));
                 }
-                validate_widget(&z.widget, &at, &font_names, &mut errs);
+                validate_widget(&z.widget, &at, &font_names, &self.base_dir, &mut errs);
             }
         }
 
@@ -1612,7 +1760,77 @@ fn validate_sparkline(s: &SparklineConfig, at: &str, errs: &mut Vec<String>) {
     }
 }
 
-fn validate_widget(w: &WidgetConfig, at: &str, font_names: &[&str], errs: &mut Vec<String>) {
+/// Whether `prog` names an existing file, directly or through `PATH`.
+fn program_exists(prog: &Path) -> bool {
+    if prog.components().count() > 1 || prog.is_absolute() {
+        return prog.is_file();
+    }
+    std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|d| d.join(prog).is_file()))
+}
+
+/// Whether `var` looks like the NAME of an environment variable.
+fn valid_env_name(var: &str) -> bool {
+    !var.is_empty()
+        && var.len() <= 64
+        && !var.starts_with(|ch: char| ch.is_ascii_digit())
+        && var
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+fn validate_video(v: &VideoConfig, at: &str, base_dir: &Path, errs: &mut Vec<String>) {
+    if v.url.is_some() {
+        errs.push(format!(
+            "{at} video: a literal url is not allowed (stream URLs carry credentials); \
+             put the URL in an environment variable and set url_env to its name, e.g. url_env = \"CAM_URL\""
+        ));
+    }
+    match (&v.path, &v.url_env) {
+        (Some(_), Some(_)) => {
+            errs.push(format!("{at} video: set either path or url_env, not both"));
+        }
+        (None, None) if v.url.is_none() => {
+            errs.push(format!("{at} video: one of path or url_env is required"));
+        }
+        (Some(p), None) => {
+            if p.as_os_str().is_empty() {
+                errs.push(format!("{at} video: path must not be empty"));
+            } else {
+                let full = base_dir.join(p);
+                if !full.is_file() {
+                    errs.push(format!(
+                        "{at} video: file {} does not exist (path is relative to the config file's directory)",
+                        full.display()
+                    ));
+                }
+            }
+        }
+        (None, Some(var)) if !valid_env_name(var) => {
+            errs.push(format!(
+                "{at} video: url_env must be the NAME of an environment variable (letters, digits and '_', e.g. \"CAM_URL\"), not the URL itself"
+            ));
+        }
+        _ => {}
+    }
+    if !(1..=MAX_VIDEO_FPS).contains(&v.fps) {
+        errs.push(format!(
+            "{at} video: fps must be 1..={MAX_VIDEO_FPS} (got {})",
+            v.fps
+        ));
+    }
+    if v.program.as_ref().is_some_and(|p| p.as_os_str().is_empty()) {
+        errs.push(format!("{at} video: program must not be empty"));
+    }
+}
+
+fn validate_widget(
+    w: &WidgetConfig,
+    at: &str,
+    font_names: &[&str],
+    base_dir: &Path,
+    errs: &mut Vec<String>,
+) {
     let (font, scale) = match w {
         WidgetConfig::Sparkline(s) => {
             validate_sparkline(s, at, errs);
@@ -1636,6 +1854,10 @@ fn validate_widget(w: &WidgetConfig, at: &str, font_names: &[&str], errs: &mut V
                 }
                 _ => {}
             }
+            return;
+        }
+        WidgetConfig::Video(v) => {
+            validate_video(v, at, base_dir, errs);
             return;
         }
         WidgetConfig::Clock(c) => {

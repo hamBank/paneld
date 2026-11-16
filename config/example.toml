@@ -262,3 +262,18 @@ name = "image"
   [[scene.zone]]
   rect = { x = 0, y = 86, w = 172, h = 86 }
   widget = { type = "text", text = "image widget", font = "9x15" }
+
+# A video zone (needs `ffmpeg` installed). Exactly one of `path` (a file,
+# relative to this file) or `url_env` (the NAME of an environment variable
+# holding a stream URL such as rtsp://user:pass@cam/stream; never put the URL
+# here). Decoded off the render thread, and only while the scene is shown.
+# [[scene]]
+# name = "camera"
+#   [[scene.zone]]
+#   rect = { x = 0, y = 0, w = 172, h = 172 }
+#   widget = { type = "video", url_env = "CAM_URL", fit = "contain", fps = 10 }
+#   #   path = "../assets/clip.mp4"   # instead of url_env: a local file
+#   #   fit = "contain" (default) | "cover" | "stretch" | "none"
+#   #   fps = 15          # 1..=60, default 15; keep it low on a Pi
+#   #   loop = false      # files: hold the last frame; default true
+#   #   program = "/usr/bin/ffmpeg"   # default: ffmpeg from PATH

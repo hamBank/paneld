@@ -37,6 +37,12 @@ sudo apt update
 sudo apt install -y ca-certificates curl git libcap2-bin
 ```
 
+Optional, only if the config has `video` zones (README, "Video widget"):
+
+```bash
+sudo apt install -y ffmpeg
+```
+
 To build from source on this machine, also install a C compiler and linker. `ring`, the TLS library, compiles some C code.
 
 ```bash

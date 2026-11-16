@@ -546,6 +546,12 @@ Secrets only via env vars (`*_env` keys). Never commit tokens.
   - The decoder starts `ffmpeg` on the first touch and stops it after `IDLE_STOP` (5 s) without a touch. A video scene in a playlist therefore costs nothing while other scenes show.
   - `ffmpeg` scales to the zone, so the widget only copies bytes.
   - Dropping the handle stops everything.
+- **M7 widget (as built, `widgets/video.rs`, `config.rs` `VideoConfig`):**
+  - Config `{ type = "video" }`: exactly one of `path` (relative to the config dir, must exist at load) or `url_env` (NAME of an env var holding the stream URL); `fit` (default `contain`), `fps` (1 to 60, default 15), `loop` (files, default true), `program` (default `ffmpeg`). A literal `url` is rejected (credentials), and its value is discarded at parse time so it cannot reach an error or `Debug` output.
+  - The URL is read from the environment when the widget is built (`VideoConfig::input`, wrapped in the same `Secret` as the Home Assistant token), never stored in the config. `Config::check_video_environment` fails `run` startup and rejects a reload when the variable is unset or empty. `paneld check` only warns (`Config::video_warnings`: `ffmpeg` not on `PATH`, variable unset in this shell), because it often runs on another machine or shell than the service.
+  - `prepare(w, h)` creates the `VideoHandle` at zone size (cheap, `ffmpeg` starts on the first touch); if it never ran, `draw` creates it. `update` touches and takes `latest()`; `draw` blits it (`ZoneTarget::blit_rgb`), no scaling. No frame, or a frame whose size is not the zone's, fills the zone black (opaque, ignores `background`, no "no signal" text).
+  - Tests use `VideoHandle::detached()` and `shared().slot.put`; golden images `video_frame` and `video_no_frame` (`tests/golden_video.rs`).
+  - The systemd unit's sandbox allows `ffmpeg` (see `deploy/README.md`).
 
 ---
 

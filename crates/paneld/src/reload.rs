@@ -227,6 +227,7 @@ impl ReloadCtx {
         let base = self.path.parent().unwrap_or(Path::new(""));
         let cfg = Config::parse_in(text, base)
             .with_context(|| format!("loading config {}", self.path.display()))?;
+        cfg.check_video_environment()?;
 
         let new = RestartOnly::from_config(&cfg);
         anyhow::ensure!(
