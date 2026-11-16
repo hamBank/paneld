@@ -40,4 +40,5 @@ pub mod template;
 mod test_broker;
 pub mod test_pattern;
 pub mod tls;
+pub mod video;
 pub mod widgets;

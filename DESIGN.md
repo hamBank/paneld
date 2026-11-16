@@ -535,11 +535,30 @@ Secrets only via env vars (`*_env` keys). Never commit tokens.
 
 ---
 
-## 9. Future: video zone (not now)
+## 9. Video zone (M7)
 - A `video` widget that owns a zone and pulls frames from an `ffmpeg` subprocess (`-f rawvideo -pix_fmt rgb24 -s WxH`) into a ring buffer, decoded off the render thread.
 - Render thread just blits the latest decoded frame, so the frame loop design is unchanged.
 - Sources: file, RTSP (e.g. a camera via HA/go2rtc).
 - Keep the `Widget` trait and canvas API compatible with this. That's the only requirement now.
+- **M7 groundwork (as built, `video/mod.rs`):**
+  - `VideoHandle` holds a `FrameSlot`, which keeps only the latest zone-sized RGB888 `Frame`.
+  - The widget calls `touch()` on every `update`, which happens only while its scene is shown, and `latest()` to read the newest frame.
+  - The decoder starts `ffmpeg` on the first touch and stops it after `IDLE_STOP` (5 s) without a touch. A video scene in a playlist therefore costs nothing while other scenes show.
+  - `ffmpeg` scales to the zone, so the widget only copies bytes.
+  - Dropping the handle stops everything.
+- **M7 decoder (as built, `video/decoder.rs`; the module doc has the details and sources):**
+  - **Threads:** one supervisor `std::thread` per zone (no tokio) owns the `ffmpeg` `Child` and polls every 20 ms for stop, idle and reader exit. A reader thread reads exactly `width*height*3` bytes per frame from stdout into `FrameSlot::put` (a partial frame at EOF is discarded). A stderr thread drains the pipe.
+  - **Lifecycle:** idle (polls `wanted()` every 100 ms) -> run while `wanted(IDLE_STOP)` -> kill and `wait()` when unwanted (the slot is **cleared**, so a returning scene never shows a stale picture). EOF, a crash or a bad exit counts `stats.errors` and restarts with backoff 1 s doubling to 30 s, reset after a run that delivered frames for 60 s. On failure the last frame is kept up to 10 s, then cleared. A non-looping file that plays to the end keeps its last frame and is not restarted until the zone goes idle. Dropping the guard kills and reaps `ffmpeg` within about a second.
+  - **Command** (`ffmpeg_args`, pure): `-nostdin -hide_banner -loglevel error`, then input options, `-i SRC -an -vf <fit>,fps=N,format=rgb24 -f rawvideo -pix_fmt rgb24 pipe:1`. Files: `-re`, plus `-stream_loop -1` when looping. RTSP: `-rtsp_transport tcp -timeout 10000000` (microseconds; `-timeout` is the socket I/O timeout since FFmpeg 5.0, so Debian 12 and 13 both have it). HTTP(S): `-rw_timeout 10000000`. Fit: contain `scale=W:H:force_original_aspect_ratio=decrease,pad=W:H:(ow-iw)/2:(oh-ih)/2:color=black`; cover `scale=...=increase,crop=W:H`; stretch `scale=W:H`; none `pad=max(iw\,W):max(ih\,H):(ow-iw)/2:(oh-ih)/2:color=black,crop=W:H`. Sources: ffmpeg.html, ffmpeg-protocols.html, ffmpeg-filters.html, and `ffmpeg -h` of the local 6.1 binary.
+  - **Secrets:** the URL is never logged. stderr lines go through `redact` (everything after `scheme://` up to whitespace becomes `***`, plus an exact-match pass on the URL), are cut at 200 bytes and are limited to 5 per 10 s.
+  - **Pi CPU:** decoding cost follows the source resolution, not the zone size. Use a camera sub-stream (about 640x360) where possible; `fps=` only caps the output. A 1080p H.264 stream is roughly one Pi 4 core in software.
+  - **Tests:** shell-script fake decoders (ordering, `wanted` gating, backoff, partial frame, drop kills even a hanging process with a grandchild) and real `ffmpeg` runs on generated NUT clips (all four fits, looping, one-shot). The real tests fail, not skip, without `ffmpeg`; CI installs it.
+- **M7 widget (as built, `widgets/video.rs`, `config.rs` `VideoConfig`):**
+  - Config `{ type = "video" }`: exactly one of `path` (relative to the config dir, must exist at load) or `url_env` (NAME of an env var holding the stream URL); `fit` (default `contain`), `fps` (1 to 60, default 15), `loop` (files, default true), `program` (default `ffmpeg`). A literal `url` is rejected (credentials), and its value is discarded at parse time so it cannot reach an error or `Debug` output.
+  - The URL is read from the environment when the widget is built (`VideoConfig::input`, wrapped in the same `Secret` as the Home Assistant token), never stored in the config. `Config::check_video_environment` fails `run` startup and rejects a reload when the variable is unset or empty. `paneld check` only warns (`Config::video_warnings`: `ffmpeg` not on `PATH`, variable unset in this shell), because it often runs on another machine or shell than the service.
+  - `prepare(w, h)` creates the `VideoHandle` at zone size (cheap, `ffmpeg` starts on the first touch); if it never ran, `draw` creates it. `update` touches and takes `latest()`; `draw` blits it (`ZoneTarget::blit_rgb`), no scaling. No frame, or a frame whose size is not the zone's, fills the zone black (opaque, ignores `background`, no "no signal" text).
+  - Tests use `VideoHandle::detached()` and `shared().slot.put`; golden images `video_frame` and `video_no_frame` (`tests/golden_video.rs`).
+  - The systemd unit's sandbox allows `ffmpeg` (see `deploy/README.md`).
 
 ---
 
