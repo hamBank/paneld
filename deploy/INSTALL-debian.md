@@ -37,7 +37,7 @@ sudo apt update
 sudo apt install -y ca-certificates curl git libcap2-bin
 ```
 
-Optional, only if the config has `video` zones (README, "Video widget"):
+Optional, only if the config has `video` zones ([video widget](../docs/scenes.md#video)):
 
 ```bash
 sudo apt install -y ffmpeg
@@ -251,7 +251,7 @@ curl -s http://127.0.0.1:8080/api/state
 
 The log shows `render loop started`, one `colorlight: found receiver` line per card, and `http listening`.
 
-To reload after editing the config, do nothing: paneld polls the file once a second. You can also run `sudo systemctl reload paneld`, which sends SIGHUP. Settings marked restart-only in the main README need `sudo systemctl restart paneld`.
+To reload after editing the config, do nothing: paneld polls the file once a second. You can also run `sudo systemctl reload paneld`, which sends SIGHUP. Settings marked restart-only in the [configuration reference](../docs/configuration.md#what-reloads-live) need `sudo systemctl restart paneld`.
 
 ## 7. Running by hand (optional)
 
