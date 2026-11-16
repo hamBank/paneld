@@ -140,7 +140,7 @@ CAM_URL=rtsp://user:password@192.168.1.20:554/stream1
 
 Cameras without RTSP can be re-streamed: [go2rtc](https://github.com/AlexxIT/go2rtc) (also built into Home Assistant) turns most cameras into an RTSP URL.
 
-CPU on a Pi: `ffmpeg` decodes the full stream in software, then scales it. Cost follows the **source** resolution and bitrate, not the zone size. Use the camera's low-resolution sub-stream (for example 640x360), keep `fps` at 5 to 15, and watch `top`. The panel itself is small, so more fps or pixels buy nothing. When a stream drops, the decoder restarts it with backoff and the zone stays black meanwhile. Under the systemd unit, keep video files outside `/home` (the unit hides it), for example in `/etc/paneld/assets`.
+CPU on a Pi: `ffmpeg` decodes the full stream in software, then scales it. Cost follows the **source** resolution and bitrate, not the zone size. Use the camera's low-resolution sub-stream (for example 640x360), keep `fps` at 5 to 15, and watch `top`. The panel itself is small, so more fps or pixels buy nothing. When a stream drops, the last frame stays up to 10 s (so a quick reconnect doesn't flicker), then the zone goes black; the decoder restarts `ffmpeg` with backoff (1 s doubling to 30 s). `ffmpeg` only runs while the video's scene is on screen: it stops 5 s after the scene leaves and starts again (from black) when it returns. Under the systemd unit, keep video files outside `/home` (the unit hides it), for example in `/etc/paneld/assets`.
 
 ### Fonts
 
