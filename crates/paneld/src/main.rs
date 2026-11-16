@@ -468,6 +468,9 @@ fn main() -> anyhow::Result<()> {
                 cfg.canvas.height,
                 cfg.scenes.len()
             );
+            for w in cfg.video_warnings() {
+                eprintln!("warning: {w}");
+            }
             Ok(())
         }
         Cmd::TestPattern(args) => test_pattern_cmd(args),
@@ -510,6 +513,7 @@ fn main() -> anyhow::Result<()> {
 fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
     let (cfg, loaded_text) = Config::load_with_text(&config_path)?;
     paneld::sources::check_environment(&cfg)?;
+    cfg.check_video_environment()?;
     let api_settings =
         paneld::api::ApiSettings::from_config(&cfg.http).map_err(anyhow::Error::msg)?;
     paneld::mqtt_ha::check_environment(&cfg)?;

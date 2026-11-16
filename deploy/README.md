@@ -152,6 +152,16 @@ Layout:
 
 `config/example.toml` refers to `../assets/...` because it lives in the repository's `config/` directory. In `/etc/paneld` those paths must point inside the directory (`assets/fonts/...`), or they would resolve to `/etc/assets`. Fonts and images are read by the service user, so they must be world-readable.
 
+### Video zones and the sandbox
+
+`video` widgets run `/usr/bin/ffmpeg` as a child process of the service (`sudo apt install ffmpeg`). The unit's sandbox is compatible with that, checked directive by directive:
+
+- `SystemCallFilter=@system-service` includes `@process` (`fork`, `clone`, `clone3`, `vfork`, `execveat`, `wait4`, `prctl`) and `@default` (`execve`, `mprotect`); verified with `systemd-analyze syscall-filter @system-service` (systemd 255). The child inherits the filter, and `ffmpeg` decoding needs nothing outside it.
+- `ProtectSystem=strict` is read-only, which is fine: `ffmpeg` only reads `/usr/bin` and the libraries, and the pipe to paneld needs no files. `ProtectHome=yes` hides `/home`, so keep video files under `/etc/paneld`.
+- `RestrictAddressFamilies` allows `AF_INET`/`AF_INET6` (RTSP, HTTP) and `AF_UNIX`; DNS works as for the other sources.
+- `NoNewPrivileges` and the `CAP_NET_RAW`-only bounding set do not matter to `ffmpeg`. `PrivateDevices=yes` means no `/dev/video*` or GPU nodes, so decoding is software only.
+- `MemoryDenyWriteExecute=yes` blocks writable+executable memory ([systemd.exec](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html)). Test result: Debian/Ubuntu `ffmpeg` 6.1 (x86-64) decoded and scaled an H.264 file to `rgb24` with the kernel's equivalent restriction (`prctl(PR_SET_MDWE)`) set, with the expected output size. We found no authoritative statement that stock `ffmpeg` builds need executable memory, but this was not run on a Pi (aarch64), nor with every codec or a hardware or JIT-based build. If `ffmpeg` dies right away with `SIGSEGV` or `SIGSYS` in the journal, relax it with a drop-in: `sudo systemctl edit paneld` and add `[Service]` / `MemoryDenyWriteExecute=no`, then `sudo systemctl restart paneld`.
+
 ### Install
 
 ```bash

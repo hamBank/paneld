@@ -66,9 +66,9 @@ fn rejects_unknown_keys() {
 #[test]
 fn rejects_unknown_widget_type() {
     let e = err(&format!(
-        "{MINIMAL}  [[scene.zone]]\n  rect = {{ x = 0, y = 0, w = 8, h = 8 }}\n  widget = {{ type = \"video\" }}\n"
+        "{MINIMAL}  [[scene.zone]]\n  rect = {{ x = 0, y = 0, w = 8, h = 8 }}\n  widget = {{ type = \"hologram\" }}\n"
     ));
-    assert!(e.contains("unknown variant `video`"), "{e}");
+    assert!(e.contains("unknown variant `hologram`"), "{e}");
 }
 
 #[test]

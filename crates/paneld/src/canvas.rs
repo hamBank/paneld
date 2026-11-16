@@ -158,6 +158,22 @@ impl ZoneTarget<'_> {
             }
         }
     }
+
+    /// Copy a zone-sized RGB888 buffer (`3 * width * height` bytes, row-major)
+    /// over the zone. A buffer of any other length is ignored.
+    pub fn blit_rgb(&mut self, rgb: &[u8]) {
+        if rgb.len() != 3 * (self.rect.w as usize) * (self.rect.h as usize) {
+            return;
+        }
+        let mut px = rgb.chunks_exact(3);
+        for y in self.rect.y..self.rect.y + self.rect.h {
+            for x in self.rect.x..self.rect.x + self.rect.w {
+                if let Some(c) = px.next() {
+                    self.canvas.set_pixel(x, y, Rgb888::new(c[0], c[1], c[2]));
+                }
+            }
+        }
+    }
 }
 
 impl OriginDimensions for ZoneTarget<'_> {

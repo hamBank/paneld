@@ -6,6 +6,7 @@ mod image;
 mod sparkline;
 mod text;
 mod value;
+mod video;
 
 use std::time::Duration;
 
@@ -22,6 +23,7 @@ pub use image::Image;
 pub use sparkline::Sparkline;
 pub use text::Text;
 pub use value::ValueWidget;
+pub use video::Video;
 
 /// Per-frame context. Everything time-dependent comes from here so renders
 /// are deterministic for a given context (golden tests rely on this).
@@ -54,6 +56,7 @@ pub fn build(cfg: &WidgetConfig) -> Box<dyn Widget> {
         WidgetConfig::Value(v) => Box::new(ValueWidget::new(v)),
         WidgetConfig::Sparkline(s) => Box::new(Sparkline::new(s)),
         WidgetConfig::Image(i) => Box::new(Image::new(i)),
+        WidgetConfig::Video(v) => Box::new(Video::new(v)),
     }
 }
 

@@ -110,6 +110,38 @@ Widgets:
   - Auto scale uses the shown points' range plus a 10% margin; flat data is drawn in the middle. Values outside a fixed scale are clamped to the edge. Non-finite points are skipped.
   - Fewer points than `points`: the graph grows in from the right edge. A single point is a dot. Missing key, wrong value type or empty series: nothing is drawn.
 
+### Video widget
+
+`video` shows a video file or a live stream (for example a camera) in a zone. It needs `ffmpeg` on the machine (`sudo apt install ffmpeg`); paneld runs it as a subprocess, scaled to the zone size, and only while the zone's scene is on screen. A playlist scene with a video costs nothing while other scenes show. Decoding never runs on the render thread: until the first frame arrives (starting up, stream down, `ffmpeg` missing) the zone is black.
+
+Set exactly one source:
+
+- `path`: a video file, relative to the config file's directory (must exist when the config loads). `loop` (default true) restarts it at the end; `loop = false` holds the last frame.
+- `url_env`: the **name** of an environment variable that holds the stream URL (`rtsp://`, `http://`, ...). A literal `url = "..."` is rejected, because stream URLs usually carry a password. The URL is never logged or shown in `Debug` output. `paneld run` refuses to start (and a reload is refused) if the variable is unset or empty; `paneld check` only warns, since it may run in a different shell than the service.
+
+Other options: `fit` (`contain` default, `cover`, `stretch`, `none`; applied by `ffmpeg`), `fps` (1 to 60, default 15; the stream's own rate is capped to this), `program` (path to `ffmpeg`, default `ffmpeg` from `PATH`). `paneld check` warns if `ffmpeg` is not found.
+
+```toml
+# A clip next to the config file
+[[scene.zone]]
+rect = { x = 0, y = 0, w = 96, h = 64 }
+widget = { type = "video", path = "assets/clip.mp4", fps = 15 }
+
+# An RTSP camera; the URL lives in /etc/paneld/env
+[[scene.zone]]
+rect = { x = 0, y = 0, w = 96, h = 64 }
+widget = { type = "video", url_env = "CAM_URL", fit = "cover", fps = 10 }
+```
+
+```
+# /etc/paneld/env
+CAM_URL=rtsp://user:password@192.168.1.20:554/stream1
+```
+
+Cameras without RTSP can be re-streamed: [go2rtc](https://github.com/AlexxIT/go2rtc) (also built into Home Assistant) turns most cameras into an RTSP URL.
+
+CPU on a Pi: `ffmpeg` decodes the full stream in software, then scales it. Cost follows the **source** resolution and bitrate, not the zone size. Use the camera's low-resolution sub-stream (for example 640x360), keep `fps` at 5 to 15, and watch `top`. The panel itself is small, so more fps or pixels buy nothing. When a stream drops, the decoder restarts it with backoff and the zone stays black meanwhile. Under the systemd unit, keep video files outside `/home` (the unit hides it), for example in `/etc/paneld/assets`.
+
 ### Fonts
 
 `font` takes a built-in name or the name of a `[[font]]`:

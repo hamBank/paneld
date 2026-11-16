@@ -535,7 +535,7 @@ Secrets only via env vars (`*_env` keys). Never commit tokens.
 
 ---
 
-## 9. Future: video zone (not now)
+## 9. Video zone (M7)
 - A `video` widget that owns a zone and pulls frames from an `ffmpeg` subprocess (`-f rawvideo -pix_fmt rgb24 -s WxH`) into a ring buffer, decoded off the render thread.
 - Render thread just blits the latest decoded frame, so the frame loop design is unchanged.
 - Sources: file, RTSP (e.g. a camera via HA/go2rtc).
@@ -553,6 +553,12 @@ Secrets only via env vars (`*_env` keys). Never commit tokens.
   - **Secrets:** the URL is never logged. stderr lines go through `redact` (everything after `scheme://` up to whitespace becomes `***`, plus an exact-match pass on the URL), are cut at 200 bytes and are limited to 5 per 10 s.
   - **Pi CPU:** decoding cost follows the source resolution, not the zone size. Use a camera sub-stream (about 640x360) where possible; `fps=` only caps the output. A 1080p H.264 stream is roughly one Pi 4 core in software.
   - **Tests:** shell-script fake decoders (ordering, `wanted` gating, backoff, partial frame, drop kills even a hanging process with a grandchild) and real `ffmpeg` runs on generated NUT clips (all four fits, looping, one-shot). The real tests fail, not skip, without `ffmpeg`; CI installs it.
+- **M7 widget (as built, `widgets/video.rs`, `config.rs` `VideoConfig`):**
+  - Config `{ type = "video" }`: exactly one of `path` (relative to the config dir, must exist at load) or `url_env` (NAME of an env var holding the stream URL); `fit` (default `contain`), `fps` (1 to 60, default 15), `loop` (files, default true), `program` (default `ffmpeg`). A literal `url` is rejected (credentials), and its value is discarded at parse time so it cannot reach an error or `Debug` output.
+  - The URL is read from the environment when the widget is built (`VideoConfig::input`, wrapped in the same `Secret` as the Home Assistant token), never stored in the config. `Config::check_video_environment` fails `run` startup and rejects a reload when the variable is unset or empty. `paneld check` only warns (`Config::video_warnings`: `ffmpeg` not on `PATH`, variable unset in this shell), because it often runs on another machine or shell than the service.
+  - `prepare(w, h)` creates the `VideoHandle` at zone size (cheap, `ffmpeg` starts on the first touch); if it never ran, `draw` creates it. `update` touches and takes `latest()`; `draw` blits it (`ZoneTarget::blit_rgb`), no scaling. No frame, or a frame whose size is not the zone's, fills the zone black (opaque, ignores `background`, no "no signal" text).
+  - Tests use `VideoHandle::detached()` and `shared().slot.put`; golden images `video_frame` and `video_no_frame` (`tests/golden_video.rs`).
+  - The systemd unit's sandbox allows `ffmpeg` (see `deploy/README.md`).
 
 ---
 
