@@ -128,7 +128,7 @@ A PNG or GIF (animated GIFs play), scaled into the zone.
 | Key | Type | Default | Valid | Meaning |
 |---|---|---|---|---|
 | `path` | path | | exactly one of `path`, `key` | Image file relative to the config file. Read and decoded when the config loads. At most 4096 px per side and 16 MiB. |
-| `key` | store key | | | A store key holding an image. **No source writes images yet**, so for now this always shows nothing; use `path`. |
+| `key` | store key | | | A store key holding an image, written by a [`media` source](sources.md#media), e.g. `photos:current`. Shows nothing while the key is missing. Animated GIFs play. |
 | `fit` | `"contain"` \| `"cover"` \| `"stretch"` \| `"none"` | `"contain"` | | `contain`: fit entirely, keep the aspect ratio. `cover`: fill the zone, keep the aspect ratio, crop. `stretch`: fill the zone exactly. `none`: native size, cropped. |
 | `align` | `"center"` `"top"` `"bottom"` `"left"` `"right"` `"top_left"` `"top_right"` `"bottom_left"` `"bottom_right"` | `"center"` | | Where the image sits when it doesn't fill the zone. |
 | `smooth` | bool | `false` | | Average pixels when shrinking (photos). Off keeps pixel art sharp. |

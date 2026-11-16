@@ -41,6 +41,8 @@ Addressing of daisy-chained cards is inferred from the protocol references, not 
 - a `video` widget playing a file or a camera stream (`url_env`), decoded by an `ffmpeg` subprocess off the render thread;
 - `ffmpeg` runs only while the scene is on screen.
 
+**After M7:** a `system` source (uptime, CPU temperature, load, memory) and a `media` folder source for `image` widgets, both planned in `DESIGN.md` §6 but left out of the milestones.
+
 All milestones in `DESIGN.md` §14 are built. What is left is bring-up and tuning on the real hardware (`DESIGN.md` §15).
 
 ## Hardware

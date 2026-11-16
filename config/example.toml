@@ -50,7 +50,7 @@ grid = true
 
 # Data sources (docs/sources.md) write store keys that widgets and conditions
 # read. Source types: static, home_assistant, mqtt, http_poll, prometheus,
-# aircraft. Put personal settings (your location, entity IDs) in a
+# aircraft, system, media. Put personal settings (your location, entity IDs) in a
 # git-ignored config/local.toml, never in this file.
 # Home Assistant: create a long-lived token (profile > Security) and put it in
 # the environment variable named by token_env; the token never goes in a file.
@@ -131,6 +131,24 @@ grid = true
 # queries = { "prom:house_power" = { query = "sum(power_watts)", unit = "W" }, "prom:up" = "min(up)" }
 # range_queries = { "prom:power_hist" = { query = "sum(power_watts)", range_s = 3600, step_s = 60 } }
 # # bearer_env = "PROM_TOKEN"   # NAME of an env var holding a bearer token
+
+# This machine: writes sys:uptime_s, sys:uptime ("3d 4h"), sys:cpu_temp_c,
+# sys:load_1m and sys:mem_used_pct (keys use the source's name). Linux only;
+# a reading that is not available (no thermal zone) shows as "--".
+# [sources.sys]
+# type = "system"
+# interval_s = 10            # 1..=3600
+# # thermal_zone = "/sys/class/thermal/thermal_zone0/temp"   # default: the CPU's zone
+
+# PNG and GIF files in a folder (relative to this file) become images in the
+# store: photos:<file stem>, photos:count and, with rotate_s, photos:current,
+# which cycles through them. Show one with an image widget's `key`.
+# [sources.photos]
+# type = "media"
+# dir = "media/photos"
+# interval_s = 60            # rescan for new, changed and removed files
+# rotate_s = 30              # optional: seconds per image in photos:current
+# max_px = 512               # bigger images are scaled down when loaded
 
 [http]
 bind = "127.0.0.1:8080"
@@ -247,8 +265,8 @@ condition = "prom:house_power > 0"
   widget = { type = "text", text = "paneld", font = "10x20", font_scale = 2, color = "#00ff80" }
 
 # A still image (or animated GIF) scaled into a zone. `path` is relative to
-# this file and is loaded when the config loads. (`key = "..."` reads an image
-# from the store instead, but no source writes images yet.)
+# this file and is loaded when the config loads. `key = "photos:current"`
+# shows an image from a `media` source instead.
 [[scene]]
 name = "image"
   [[scene.zone]]

@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use chrono::DateTime;
 use paneld::config::Config;
-use paneld::media::Bitmap;
+use paneld::media::{Bitmap, Media};
 use paneld::png_io;
 use paneld::render::render_scene;
 use paneld::store::{Store, StoreSnapshot, Value};
@@ -205,12 +205,16 @@ fn golden_image_from_store_follows_the_stored_image() {
 
     let red = Arc::new(Bitmap::new(2, 2, [255u8, 0, 0, 255].repeat(4)).unwrap());
     let store = Store::new();
-    store.writer("test").set("media:test", Value::Image(red));
+    store
+        .writer("test")
+        .set("media:test", Value::Image(Arc::new(Media::still(red))));
     check_with("image_from_store_red", "from_store", 0, &store.snapshot());
 
     // A later write replaces the image.
     let blue = Arc::new(Bitmap::new(2, 2, [0u8, 0, 255, 255].repeat(4)).unwrap());
-    store.writer("test").set("media:test", Value::Image(blue));
+    store
+        .writer("test")
+        .set("media:test", Value::Image(Arc::new(Media::still(blue))));
     check_with("image_from_store_blue", "from_store", 0, &store.snapshot());
 }
 
@@ -223,7 +227,11 @@ fn golden_image_store_swap_changes_output_and_steady_frames_do_not() {
     let store = Store::new();
     let w = store.writer("test");
     let mut canvas = paneld::canvas::Canvas::new(48, 32);
-    let px = |c: [u8; 4]| Arc::new(Bitmap::new(1, 1, c.to_vec()).unwrap());
+    let px = |c: [u8; 4]| {
+        Arc::new(Media::still(Arc::new(
+            Bitmap::new(1, 1, c.to_vec()).unwrap(),
+        )))
+    };
 
     w.set("media:test", Value::Image(px([255, 0, 0, 255])));
     scene.render(&ctx(0), &store.snapshot(), &mut canvas);

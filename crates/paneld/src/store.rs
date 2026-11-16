@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
-use crate::media::Bitmap;
+use crate::media::Media;
 
 /// A stored value.
 #[derive(Debug, Clone, PartialEq)]
@@ -25,9 +25,10 @@ pub enum Value {
     /// one refcount bump, while appending a point (rare, off the render
     /// thread) copies at most `max_len` 16-byte points.
     Series(Arc<[(SystemTime, f64)]>),
-    /// A decoded image. Shared, so cloning a value or a snapshot is cheap and
-    /// widgets can tell a new image from the old one by pointer.
-    Image(Arc<Bitmap>),
+    /// A decoded image or animation (all GIF frames). Shared, so cloning a
+    /// value or a snapshot is cheap and widgets can tell a new image from the
+    /// old one by pointer.
+    Image(Arc<Media>),
     /// Structured data a source wants to keep whole (e.g. the aircraft list).
     /// Shared, so snapshot clones stay cheap.
     Json(Arc<serde_json::Value>),

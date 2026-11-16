@@ -12,6 +12,8 @@ Each `[sources.<name>]` table is one source, picked by `type`:
 | [`http_poll`](#http_poll) | values picked out of a JSON URL | the keys you list |
 | [`prometheus`](#prometheus) | PromQL instant and range queries | the keys you list |
 | [`aircraft`](#aircraft) | aircraft near a point (adsb.fi or a local receiver) | `<name>:…` |
+| [`system`](#system) | uptime, CPU temperature, load and memory of this machine | `<name>:…` |
+| [`media`](#media) | PNG and GIF images from a folder | `<name>:…` |
 
 There is also one push path: [`POST /api/data/{key}`](control.md#post-apidatakey) writes keys under `[http] data_prefix` (default `push:`).
 
@@ -19,7 +21,7 @@ There is also one push path: [`POST /api/data/{key}`](control.md#post-apidatakey
 
 The store maps a key to an entry. An entry holds a value, the time it was written and the name of the source that wrote it.
 
-**Keys** look like `source:name` (see [common value types](configuration.md#common-value-types)). The prefix is a convention: `home_assistant` always writes `ha:…`, `aircraft` writes `<source name>:…`, and the other sources write exactly the keys you configure. Two sources must not write the same key.
+**Keys** look like `source:name` (see [common value types](configuration.md#common-value-types)). The prefix is a convention: `home_assistant` always writes `ha:…`; `aircraft`, `system` and `media` write `<source name>:…`; the other sources write exactly the keys you configure. Two sources must not write the same key.
 
 **Value kinds:**
 
@@ -30,7 +32,7 @@ The store maps a key to an entry. An entry holds a value, the time it was writte
 | Bool | JSON booleans | templates (`on`/`off`), conditions |
 | Series (time, number points) | HA `series`, Prometheus `range_queries` | `sparkline` |
 | JSON | arrays and objects | nothing on screen yet (templates show `--`) |
-| Image | not produced by any source yet | `image` with `key` |
+| Image (a still or an animation) | `media` | `image` with `key` |
 
 JSON is turned into values the same way everywhere (`http_poll`, `mqtt`, HA attributes, pushes):
 - numbers, and strings that parse as numbers, become Number;
@@ -311,6 +313,88 @@ The adsb.fi terms ask for attribution: when an aircraft source is configured, th
 
 ---
 
+## `system`
+
+Uptime, CPU temperature, load and memory use of the machine paneld runs on, read from `/proc` and `/sys` (Linux).
+
+```toml
+[sources.sys]
+type = "system"
+```
+
+| Key | Type | Default | Valid | Meaning |
+|---|---|---|---|---|
+| `interval_s` | float | `10` | 1–3600 | Seconds between readings. |
+| `thermal_zone` | path | the CPU's zone | not empty | File holding the CPU temperature in millidegrees Celsius, e.g. `/sys/class/thermal/thermal_zone0/temp`. By default, the first `/sys/class/thermal/thermal_zone*` whose `type` names the CPU or SoC (`cpu-thermal` on a Raspberry Pi, `x86_pkg_temp` on Intel), else zone 0. |
+
+**Keys written,** prefixed with the source's name (`[sources.sys]` writes `sys:*`):
+
+| Key | Value | From |
+|---|---|---|
+| `<name>:uptime_s` | Number, unit `s` | `/proc/uptime` |
+| `<name>:uptime` | Text: `3d 4h`, `5h 12m` or `42m` | `/proc/uptime` |
+| `<name>:cpu_temp_c` | Number, unit `°C`, 1 decimal | the thermal zone |
+| `<name>:load_1m` | Number, the 1-minute load average | `/proc/loadavg` |
+| `<name>:mem_used_pct` | Number, unit `%`, 1 decimal: the share of `MemTotal` that is not `MemAvailable` | `/proc/meminfo` |
+
+```toml
+widget = { type = "text", text = "CPU {sys:cpu_temp_c:.0}°C  up {sys:uptime}" }
+```
+
+- **Readings that fail.** A reading that can't be made removes its key, so widgets show `--`. That happens when the file is missing (a machine without a thermal zone, a VM, macOS) or has an unknown format.
+- **Nothing readable.** If no reading works at all, the source logs a warning once and counts an error each round. It keeps trying, since a thermal driver may load later.
+- **Thermal zone choice.** The zone is chosen once per run.
+
+---
+
+## `media`
+
+Loads every PNG and GIF in a folder into the store, for `image` widgets with `key`. Animated GIFs keep all their frames and play.
+
+```toml
+[sources.photos]
+type = "media"
+dir = "media/photos"       # relative to the config file
+rotate_s = 30              # optional: photos:current cycles through the images
+```
+
+```toml
+widget = { type = "image", key = "photos:current", fit = "cover", smooth = true }
+```
+
+| Key | Type | Default | Valid | Meaning |
+|---|---|---|---|---|
+| `dir` | path | required | an existing folder | The folder, relative to the config file. Subfolders are not searched. Under the systemd unit, keep it outside `/home`, e.g. `/etc/paneld/media`. |
+| `interval_s` | float | `60` | 1–86400 | Seconds between rescans for added, changed and removed files. |
+| `rotate_s` | float | none | > 0, at most 86400 | Seconds each image stays in `<name>:current`. Unset: no `current` key. |
+| `max_px` | integer | `512` | 16–4096 | Images whose longer side is bigger are scaled down (keeping the aspect ratio, smoothed) when loaded. The render loop then only scales small images to their zone. |
+
+**Keys written,** prefixed with the source's name (`[sources.photos]` writes `photos:*`):
+
+| Key | Value |
+|---|---|
+| `<name>:<file stem>` | The image in that file: `photos:beach` for `beach.png`. |
+| `<name>:count` | Number of images loaded. |
+| `<name>:current` | With `rotate_s`: one of the images, moving to the next in file name order every `rotate_s`. After a rescan it stays on the same image while that file exists. |
+
+**Which files load.**
+- Files ending `.png` or `.gif` (any case) load; other files are ignored.
+- The name before the extension must be letters, digits, `_`, `.` and `-`, and must not be `count` or `current`. Other names are skipped with a warning; rename the file.
+- Each file has the [`image` widget's limits](scenes.md#image): 16 MiB per file and 4096 px a side.
+- Per source:
+  - at most 256 images;
+  - at most 256 MiB of decoded pixels, counted after `max_px`.
+
+  Files past those limits, in name order, are skipped with a warning.
+
+**Scanning.**
+- A file is decoded again only when its size or modification time changes.
+- A removed file removes its key.
+- Decoding happens off the render thread.
+- A skipped file is logged once, and doesn't count as a source error. A folder that can't be read does count, and the old images stay.
+
+---
+
 ## JSON paths
 
 `http_poll` `extract` and `mqtt` `path` use a small path syntax. `$` is the root, followed by any of:
@@ -319,7 +403,3 @@ The adsb.fi terms ask for attribution: when an aircraft source is configured, th
 - `[index]` (a non-negative array index).
 
 Examples: `$.current.temp`, `$.list[0].main.temp`, `$["odd.key"]`. Wildcards, filters and slices are not supported. Paths are checked when the config loads; an error names the column.
-
-## Not built yet
-
-DESIGN.md §6 also lists a **clock/system** source (uptime, CPU temperature) and a **media folder** source (images in the store, for `image` widgets with `key`). Neither exists yet. The `clock` widget covers time and date.

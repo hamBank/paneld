@@ -20,10 +20,12 @@
 pub mod aircraft;
 pub mod ha;
 pub mod http_poll;
+pub mod media;
 pub mod mqtt;
 pub mod poll;
 pub mod prometheus;
 pub mod static_values;
+pub mod system;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
@@ -57,6 +59,8 @@ pub fn build(name: &str, cfg: &SourceConfig) -> anyhow::Result<Box<dyn Source>> 
         SourceConfig::Mqtt(c) => Ok(Box::new(mqtt::MqttSource::new(name, c)?)),
         SourceConfig::HttpPoll(c) => Ok(Box::new(http_poll::HttpPollSource::new(c)?)),
         SourceConfig::Prometheus(c) => Ok(Box::new(prometheus::PromSource::new(c)?)),
+        SourceConfig::System(c) => Ok(Box::new(system::SystemSource::new(name, c))),
+        SourceConfig::Media(c) => Ok(Box::new(media::MediaFolderSource::new(name, c))),
     }
 }
 

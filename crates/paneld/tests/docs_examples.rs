@@ -86,6 +86,7 @@ fn is_file_error(e: &str) -> bool {
         "No such file",
         "cannot read",
         "not found",
+        "is not a directory",
     ]
     .iter()
     .any(|m| e.contains(m))
