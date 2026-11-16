@@ -540,6 +540,12 @@ Secrets only via env vars (`*_env` keys). Never commit tokens.
 - Render thread just blits the latest decoded frame, so the frame loop design is unchanged.
 - Sources: file, RTSP (e.g. a camera via HA/go2rtc).
 - Keep the `Widget` trait and canvas API compatible with this. That's the only requirement now.
+- **M7 groundwork (as built, `video/mod.rs`):**
+  - `VideoHandle` holds a `FrameSlot`, which keeps only the latest zone-sized RGB888 `Frame`.
+  - The widget calls `touch()` on every `update`, which happens only while its scene is shown, and `latest()` to read the newest frame.
+  - The decoder starts `ffmpeg` on the first touch and stops it after `IDLE_STOP` (5 s) without a touch. A video scene in a playlist therefore costs nothing while other scenes show.
+  - `ffmpeg` scales to the zone, so the widget only copies bytes.
+  - Dropping the handle stops everything.
 
 ---
 
