@@ -191,7 +191,9 @@ fn backoff_doubles_to_the_cap() {
 // Helpers for process tests
 // ---------------------------------------------------------------------------
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // only the Linux process tests use these
 struct TempDir(PathBuf);
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // only the Linux process tests use these
 impl TempDir {
     fn new(tag: &str) -> Self {
         use std::sync::atomic::AtomicU32;
@@ -214,6 +216,7 @@ impl Drop for TempDir {
     }
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // only the Linux process tests use these
 fn wait_until(what: &str, max: Duration, shared: Option<&Shared>, mut cond: impl FnMut() -> bool) {
     let end = Instant::now() + max;
     while Instant::now() < end {
@@ -228,6 +231,7 @@ fn wait_until(what: &str, max: Duration, shared: Option<&Shared>, mut cond: impl
     panic!("timed out waiting for {what}");
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // only the Linux process tests use these
 fn fast() -> Timing {
     Timing {
         idle_stop: Duration::from_millis(300),
