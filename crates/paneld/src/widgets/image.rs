@@ -19,8 +19,8 @@ use crate::store::{StoreSnapshot, Value};
 /// already holds (its background). GIF frames are chosen from
 /// `FrameCtx::scene_elapsed`.
 ///
-/// M3's media source will move file loading off the config-load path (async,
-/// on demand); this widget will then see those images through `key`.
+/// `key` images come from the `media` source (`sources/media.rs`), which
+/// decodes and downsizes them off the render thread.
 pub struct Image {
     source: Source,
     fit: Fit,
@@ -94,13 +94,10 @@ impl Widget for Image {
     fn update(&mut self, ctx: &FrameCtx, store: &StoreSnapshot) {
         if let Source::Key(key) = &self.source {
             match store.get(key).map(|e| &e.value) {
-                Some(Value::Image(bmp)) => {
-                    let same = self
-                        .media
-                        .as_ref()
-                        .is_some_and(|m| Arc::ptr_eq(&m.frames()[0].bitmap, bmp));
+                Some(Value::Image(media)) => {
+                    let same = self.media.as_ref().is_some_and(|m| Arc::ptr_eq(m, media));
                     if !same {
-                        self.media = Some(Arc::new(Media::still(bmp.clone())));
+                        self.media = Some(media.clone());
                     }
                 }
                 // Missing or not an image: show nothing.

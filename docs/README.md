@@ -3,7 +3,7 @@
 | Page | Covers |
 |---|---|
 | [Configuration reference](configuration.md) | Every config section and key: types, defaults, limits, what reloads live. |
-| [Sources](sources.md) | The store. The `static`, `home_assistant`, `mqtt`, `http_poll`, `prometheus` and `aircraft` sources: settings, keys written, failure behaviour. |
+| [Sources](sources.md) | The store. The `static`, `home_assistant`, `mqtt`, `http_poll`, `prometheus`, `aircraft`, `system` and `media` sources: settings, keys written, failure behaviour. |
 | [Scenes and widgets](scenes.md) | Layout, zones, the `clock`, `text`, `value`, `sparkline`, `image` and `video` widgets, fonts, icons, templates, number formats, conditions, the playlist and notifications. |
 | [Outputs](outputs.md) | The preview, the Colorlight card, the output map (regions, rotation, flip), brightness and auto-dim. |
 | [Control interfaces](control.md) | The HTTP API (every endpoint), Home Assistant over MQTT (entities, topics, payloads), metrics, live reload, signals, the CLI and environment variables. |

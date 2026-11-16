@@ -1241,3 +1241,72 @@ fn the_commented_region_block_in_the_example_config_is_valid() {
     assert_eq!(c.regions.len(), 2);
     assert_eq!(c.output_map(172, 172).unwrap().card_size(), (172, 172));
 }
+
+const MINIMAL_SCENE: &str = r#"
+[[scene]]
+name = "a"
+  [[scene.zone]]
+  rect = { x = 0, y = 0, w = 64, h = 32 }
+  widget = { type = "clock" }
+"#;
+
+#[test]
+fn system_source_defaults_and_validation() {
+    let cfg = Config::parse(&format!(
+        "[canvas]\nwidth = 64\nheight = 32\n[sources.sys]\ntype = \"system\"\n{MINIMAL_SCENE}"
+    ))
+    .unwrap();
+    let Some(paneld::config::SourceConfig::System(s)) = cfg.sources.get("sys") else {
+        panic!("system source");
+    };
+    assert_eq!(s.interval_s, 10.0);
+    assert!(s.thermal_zone.is_none());
+
+    let e = err(&format!(
+        "[canvas]\nwidth = 64\nheight = 32\n[sources.sys]\ntype = \"system\"\ninterval_s = 0.5\nthermal_zone = \"\"\n{MINIMAL_SCENE}"
+    ));
+    assert!(
+        e.contains("sources.sys: interval_s must be 1 to 3600"),
+        "{e}"
+    );
+    assert!(
+        e.contains("sources.sys: thermal_zone must not be empty"),
+        "{e}"
+    );
+    assert!(err(&format!(
+        "[canvas]\nwidth = 64\nheight = 32\n[sources.sys]\ntype = \"system\"\nbogus = 1\n{MINIMAL_SCENE}"
+    ))
+    .contains("unknown field `bogus`"));
+}
+
+#[test]
+fn media_source_defaults_resolution_and_validation() {
+    let base = std::env::temp_dir().join(format!("paneld-cfg-media-{}", std::process::id()));
+    std::fs::create_dir_all(base.join("photos")).unwrap();
+    let text = format!(
+        "[canvas]\nwidth = 64\nheight = 32\n[sources.photos]\ntype = \"media\"\ndir = \"photos\"\n{MINIMAL_SCENE}"
+    );
+    let cfg = Config::parse_in(&text, &base).unwrap();
+    let Some(paneld::config::SourceConfig::Media(m)) = cfg.sources.get("photos") else {
+        panic!("media source");
+    };
+    assert_eq!((m.interval_s, m.rotate_s, m.max_px), (60.0, None, 512));
+    assert_eq!(
+        m.dir(),
+        base.join("photos"),
+        "dir is relative to the config file"
+    );
+
+    let bad = format!(
+        "[canvas]\nwidth = 64\nheight = 32\n[sources.photos]\ntype = \"media\"\ndir = \"missing\"\ninterval_s = 0\nrotate_s = -1\nmax_px = 8\n{MINIMAL_SCENE}"
+    );
+    let e = format!("{:#}", Config::parse_in(&bad, &base).unwrap_err());
+    assert!(
+        e.contains("sources.photos: dir ") && e.contains("is not a directory"),
+        "{e}"
+    );
+    assert!(e.contains("interval_s must be 1 to 86400"), "{e}");
+    assert!(e.contains("rotate_s must be > 0"), "{e}");
+    assert!(e.contains("max_px must be 16 to 4096"), "{e}");
+    let _ = std::fs::remove_dir_all(&base);
+}

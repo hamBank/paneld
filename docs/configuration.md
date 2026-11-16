@@ -13,7 +13,7 @@ Related pages:
 
 - **Unknown keys are errors.** A typo is reported instead of being silently ignored.
 - **All problems at once.** Validation collects every error and prints them together, for example `scene "home" zone[2]: rect { x = 0, y = 160, w = 172, h = 22 } does not fit the 172x172 canvas`. `paneld check --config FILE` runs the same checks without starting anything.
-- **Relative paths** (`[[font]] path`, image `path`, video `path`) are resolved against the directory of the config file.
+- **Relative paths** (`[[font]] path`, image `path`, video `path`, media `dir`) are resolved against the directory of the config file.
 - **Files are read when the config loads**, never on the render thread. A missing or broken font or image is a config error naming the file.
 - **Secrets never go in the file.** Every token or password is given as the **name** of an environment variable (`token_env`, `password_env`, `bearer_env`, `header_env`, `url_env`). `paneld run` refuses to start if one of those variables is unset or empty, naming the variable. The values are never logged. A variable name must be letters, digits and `_`.
 - **Keep personal settings** (your location, entity IDs, API URLs) in a git-ignored `config/local.toml`.
@@ -192,4 +192,4 @@ At least one is required. Scenes rotate in file order. Details: [Scenes and widg
 
 ## `[sources.<name>]`
 
-Data sources, one table per source, selected by `type`: `static`, `home_assistant`, `mqtt`, `http_poll`, `prometheus`, `aircraft`. The name may use letters, digits, `_` and `-`. Every key, default and limit is in [Sources](sources.md).
+Data sources, one table per source, selected by `type`: `static`, `home_assistant`, `mqtt`, `http_poll`, `prometheus`, `aircraft`, `system`, `media`. The name may use letters, digits, `_` and `-`. Every key, default and limit is in [Sources](sources.md).

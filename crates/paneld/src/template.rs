@@ -375,7 +375,9 @@ mod tests {
 
     #[test]
     fn missing_and_unsupported_values_are_dashes() {
-        let img = Value::Image(Arc::new(Bitmap::transparent(1, 1)));
+        let img = Value::Image(Arc::new(crate::media::Media::still(Arc::new(
+            Bitmap::transparent(1, 1),
+        ))));
         let s = store(&[
             ("ha:inf", num(f64::INFINITY)),
             ("ha:nan", num(f64::NAN)),

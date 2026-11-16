@@ -91,6 +91,72 @@ pub enum SourceConfig {
     HttpPoll(HttpPollConfig),
     /// Prometheus instant and range queries (`sources/prometheus.rs`).
     Prometheus(PromConfig),
+    /// Uptime, CPU temperature, load and memory of this machine
+    /// (`sources/system.rs`).
+    System(SystemSourceConfig),
+    /// PNG and GIF files in a folder, as images in the store
+    /// (`sources/media.rs`).
+    Media(MediaSourceConfig),
+}
+
+/// `type = "system"` (DESIGN.md §6 item 5). Keys are `<source name>:...`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SystemSourceConfig {
+    /// Seconds between readings, 1 to 3600.
+    #[serde(default = "default_system_interval_s")]
+    pub interval_s: f64,
+    /// File holding the CPU temperature in millidegrees Celsius. Default:
+    /// the first `/sys/class/thermal/thermal_zone*` whose type names the CPU
+    /// (`cpu-thermal` on a Pi, `x86_pkg_temp` on Intel), else zone 0.
+    #[serde(default)]
+    pub thermal_zone: Option<PathBuf>,
+}
+
+fn default_system_interval_s() -> f64 {
+    10.0
+}
+
+/// `type = "media"` (DESIGN.md §6 item 6). Keys are `<source name>:<file
+/// stem>`, plus `<source name>:count` and, with `rotate_s`,
+/// `<source name>:current`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MediaSourceConfig {
+    /// Folder of `.png` and `.gif` files, relative to the config file's
+    /// directory. Not searched recursively.
+    pub dir: PathBuf,
+    /// Seconds between rescans for added, changed and removed files, 1 to
+    /// 86400.
+    #[serde(default = "default_media_interval_s")]
+    pub interval_s: f64,
+    /// Seconds each image stays in `<name>:current`, which cycles through
+    /// the images in file name order. Unset: no `current` key.
+    #[serde(default)]
+    pub rotate_s: Option<f64>,
+    /// Images larger than this many pixels on their longer side are scaled
+    /// down (keeping the aspect ratio) when loaded, so the render loop never
+    /// scales a camera-sized photo. 16 to 4096.
+    #[serde(default = "default_media_max_px")]
+    pub max_px: u32,
+    /// `dir` joined onto the config file's directory, filled in by
+    /// [`Config::resolve_media_dirs`].
+    #[serde(skip)]
+    pub resolved_dir: Option<PathBuf>,
+}
+
+fn default_media_interval_s() -> f64 {
+    60.0
+}
+fn default_media_max_px() -> u32 {
+    512
+}
+
+impl MediaSourceConfig {
+    /// The folder to scan: `resolved_dir` if set, else `dir` as written.
+    pub fn dir(&self) -> &Path {
+        self.resolved_dir.as_deref().unwrap_or(&self.dir)
+    }
 }
 
 /// `type = "http_poll"` (DESIGN.md §6.3).
@@ -965,8 +1031,8 @@ pub struct ImageConfig {
     /// decoded once, while the config is loaded.
     #[serde(default)]
     pub path: Option<PathBuf>,
-    /// Store key holding a `Value::Image`. No source writes images yet
-    /// (DESIGN.md §6 item 6), so for now this shows nothing.
+    /// Store key holding a `Value::Image`, written by a `media` source
+    /// (`sources/media.rs`), e.g. `photos:current`.
     #[serde(default)]
     pub key: Option<String>,
     #[serde(default)]
@@ -1192,7 +1258,7 @@ impl Config {
                 SourceConfig::HomeAssistant(_) => {
                     out.insert("ha".to_owned());
                 }
-                SourceConfig::Aircraft(_) => {}
+                SourceConfig::Aircraft(_) | SourceConfig::System(_) | SourceConfig::Media(_) => {}
             }
         }
         out.extend(
@@ -1221,6 +1287,7 @@ impl Config {
         errs.extend(cfg.load_fonts());
         errs.extend(cfg.load_media());
         cfg.resolve_video_paths();
+        cfg.resolve_media_dirs();
         if errs.is_empty() {
             Ok(cfg)
         } else {
@@ -1315,6 +1382,15 @@ impl Config {
                 if let WidgetConfig::Video(v) = &mut z.widget {
                     v.resolved_path = v.path.as_ref().map(|p| self.base_dir.join(p));
                 }
+            }
+        }
+    }
+
+    /// Join each `media` source's `dir` onto the config file's directory.
+    pub fn resolve_media_dirs(&mut self) {
+        for src in self.sources.values_mut() {
+            if let SourceConfig::Media(m) = src {
+                m.resolved_dir = Some(self.base_dir.join(&m.dir));
             }
         }
     }
@@ -1633,6 +1709,52 @@ impl Config {
                     }
                     if !(c.url.starts_with("http://") || c.url.starts_with("https://")) {
                         errs.push(format!("{at}: url must start with http:// or https://"));
+                    }
+                }
+                SourceConfig::System(c) => {
+                    if !(c.interval_s.is_finite() && (1.0..=3600.0).contains(&c.interval_s)) {
+                        errs.push(format!(
+                            "{at}: interval_s must be 1 to 3600 (got {})",
+                            c.interval_s
+                        ));
+                    }
+                    if c.thermal_zone
+                        .as_ref()
+                        .is_some_and(|p| p.as_os_str().is_empty())
+                    {
+                        errs.push(format!(
+                            "{at}: thermal_zone must not be empty (omit it to pick the CPU zone)"
+                        ));
+                    }
+                }
+                SourceConfig::Media(c) => {
+                    if c.dir.as_os_str().is_empty() {
+                        errs.push(format!("{at}: dir must not be empty"));
+                    } else {
+                        let full = self.base_dir.join(&c.dir);
+                        if !full.is_dir() {
+                            errs.push(format!("{at}: dir {} is not a directory", full.display()));
+                        }
+                    }
+                    if !(c.interval_s.is_finite() && (1.0..=86_400.0).contains(&c.interval_s)) {
+                        errs.push(format!(
+                            "{at}: interval_s must be 1 to 86400 (got {})",
+                            c.interval_s
+                        ));
+                    }
+                    if let Some(r) = c.rotate_s {
+                        if !valid_duration(r) {
+                            errs.push(format!(
+                                "{at}: rotate_s must be > 0 and at most {MAX_DURATION_S} (got {r})"
+                            ));
+                        }
+                    }
+                    if !(16..=crate::media::MAX_DIMENSION).contains(&c.max_px) {
+                        errs.push(format!(
+                            "{at}: max_px must be 16 to {} (got {})",
+                            crate::media::MAX_DIMENSION,
+                            c.max_px
+                        ));
                     }
                 }
             }

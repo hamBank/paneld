@@ -268,14 +268,14 @@ fn axis_taps(src: u32, dst: u32, smooth: bool) -> Vec<Vec<(u32, f32)>> {
 }
 
 /// One displayed frame and how long it stays up.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MediaFrame {
     pub bitmap: Arc<Bitmap>,
     pub delay: Duration,
 }
 
 /// A still image (one frame) or an animation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Media {
     frames: Vec<MediaFrame>,
     total: Duration,
@@ -295,6 +295,53 @@ impl Media {
 
     pub fn frames(&self) -> &[MediaFrame] {
         &self.frames
+    }
+
+    /// Width and height of the first frame (every frame of a decoded media
+    /// has the same size).
+    pub fn size(&self) -> (u32, u32) {
+        self.frames
+            .first()
+            .map_or((0, 0), |f| (f.bitmap.width(), f.bitmap.height()))
+    }
+
+    /// Bytes of RGBA pixel data held by all frames.
+    pub fn decoded_bytes(&self) -> usize {
+        self.frames
+            .iter()
+            .map(|f| f.bitmap.width() as usize * f.bitmap.height() as usize * 4)
+            .sum()
+    }
+
+    /// Shrink every frame (keeping the aspect ratio, with box filtering) so
+    /// the longer side is at most `max_px`. Smaller media is returned as is.
+    /// Plain CPU work, but slow for big images: keep it off the render thread.
+    pub fn downscaled(self, max_px: u32) -> Media {
+        let (w, h) = self.size();
+        let long = w.max(h);
+        if long <= max_px || max_px == 0 {
+            return self;
+        }
+        let scale = |v: u32| {
+            ((u64::from(v) * u64::from(max_px) + u64::from(long) / 2) / u64::from(long)).max(1)
+                as u32
+        };
+        let (tw, th) = (scale(w), scale(h));
+        let frames = self
+            .frames
+            .into_iter()
+            .map(|f| MediaFrame {
+                bitmap: Arc::new(
+                    f.bitmap
+                        .fitted(tw, th, Fit::Stretch, ImageAlign::Center, true),
+                ),
+                delay: f.delay,
+            })
+            .collect();
+        Media {
+            frames,
+            total: self.total,
+        }
     }
 
     pub fn is_animated(&self) -> bool {
