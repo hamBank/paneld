@@ -788,6 +788,30 @@ name = "a"
 }
 
 #[test]
+fn referenced_keys_include_the_auto_dim_lux_sensor() {
+    // The HA source subscribes only to referenced entities, so a lux sensor
+    // used only for auto-dim must be listed here or it is never fetched.
+    let cfg = Config::parse(
+        r#"
+[canvas]
+width = 64
+height = 32
+[auto_dim.lux]
+key = "ha:sensor.lux"
+curve = [[0, 20], [400, 255]]
+[[scene]]
+name = "a"
+  [[scene.zone]]
+  rect = { x = 0, y = 0, w = 64, h = 32 }
+  widget = { type = "clock" }
+"#,
+    )
+    .unwrap();
+    let keys: Vec<_> = cfg.referenced_keys().into_iter().collect();
+    assert_eq!(keys, vec!["ha:sensor.lux"]);
+}
+
+#[test]
 fn bad_templates_are_config_errors_naming_scene_zone_and_column() {
     let e = err(r#"
 [canvas]

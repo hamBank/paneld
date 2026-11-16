@@ -1,9 +1,7 @@
 //! `paneld`: composes data into scenes and drives HUB75 LED panels.
 //!
-//! See `DESIGN.md` at the repository root for the architecture. As of
-//! milestone M0 this crate contains the config, canvas, data store, scene
-//! renderer with the `clock` and `text` widgets, the render loop and the
-//! HTTP preview sink.
+//! See `DESIGN.md` at the repository root for the architecture and `docs/`
+//! for the user documentation.
 
 pub mod api;
 pub mod autodim;

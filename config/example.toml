@@ -1,11 +1,12 @@
-# paneld example config. See DESIGN.md §8 for the full planned schema;
-# only what the current milestone implements is accepted here.
+# paneld example config. Every key is described in docs/configuration.md;
+# unknown keys are rejected.
 
 # Edits to this file are picked up live by `paneld run` (polled every second,
 # applied once the content is stable; `kill -HUP` reloads at once). Scenes,
-# zones, widgets and the playlist reload; canvas size, canvas.fps, [http] and
-# [[output]] need a restart (a size change is rejected). A config with errors
-# is logged and ignored; the old one keeps running.
+# zones, widgets, the playlist and [sources] reload; canvas.fps, [http],
+# [mqtt], [quiet_hours], [auto_dim] and [[output]] need a restart, and a canvas
+# size change is rejected. A config with errors is logged and ignored; the old
+# one keeps running.
 
 [canvas]
 width = 172        # two 172x86 panels (1/43 scan) stacked vertically
@@ -47,9 +48,9 @@ grid = true
 # rotate = 180                  # clockwise: 0 (default), 90, 180, 270
 # flip = "none"                 # "none" (default), "horizontal", "vertical"; applied before rotate
 
-# Data sources (DESIGN.md §6) write store keys that widgets and conditions read.
-# Source types: static, home_assistant, aircraft, http_poll, prometheus (mqtt
-# arrives in M3). Put personal settings (your location, entity IDs) in a
+# Data sources (docs/sources.md) write store keys that widgets and conditions
+# read. Source types: static, home_assistant, mqtt, http_poll, prometheus,
+# aircraft. Put personal settings (your location, entity IDs) in a
 # git-ignored config/local.toml, never in this file.
 # Home Assistant: create a long-lived token (profile > Security) and put it in
 # the environment variable named by token_env; the token never goes in a file.
@@ -99,7 +100,7 @@ grid = true
 # radius_nm = 10             # 1..=250
 # max_altitude_ft = 15000    # optional
 # include_ground = false
-# interval_s = 15            # >= 1; adsb.fi allows 1 request/s
+# interval_s = 15            # 1..=86400; adsb.fi allows 1 request/s
 # routes = true              # look up origin/destination on adsbdb
 # list_len = 5               # 1..=20 entries in aircraft:list
 # # url = "http://receiver.local/tar1090/data/aircraft.json"   # a local readsb
@@ -113,7 +114,7 @@ grid = true
 # [sources.weather]
 # type = "http_poll"
 # url = "https://api.example.com/v1/forecast?city=example"
-# interval_s = 600           # >= 1, default 60
+# interval_s = 600           # 1..=86400, default 60
 # timeout_s = 10             # 1..=120
 # extract = { "weather:temp" = { path = "$.current.temp", unit = "C" }, "weather:icon" = "$.current.icon" }
 # headers = { Accept = "application/json" }
@@ -126,7 +127,7 @@ grid = true
 # [sources.prom]
 # type = "prometheus"
 # url = "http://prometheus.local:9090"
-# interval_s = 15            # >= 1, default 15
+# interval_s = 15            # 1..=86400, default 15
 # queries = { "prom:house_power" = { query = "sum(power_watts)", unit = "W" }, "prom:up" = "min(up)" }
 # range_queries = { "prom:power_hist" = { query = "sum(power_watts)", range_s = 3600, step_s = 60 } }
 # # bearer_env = "PROM_TOKEN"   # NAME of an env var holding a bearer token
@@ -217,8 +218,8 @@ duration_s = 20           # seconds on screen per turn
   [[scene.zone]]
   rect = { x = 0, y = 108, w = 172, h = 21 }
   widget = { type = "text", text = "Out {ha:sensor.outside_temperature:.1}°C", font = "9x15", color = "#80c0ff" }
-  # Data sources arrive in M3. Until a source writes these keys the widgets
-  # show a dim "--" (value) or nothing (sparkline).
+  # Until a source writes these keys the widgets show a dim "--" (value) or
+  # nothing (sparkline).
   [[scene.zone]]
   rect = { x = 0, y = 129, w = 172, h = 21 }
   widget = { type = "value", key = "ha:sensor.outside_temperature", format = "{:.1}", unit = "°C", icon = "thermometer", font = "9x15", color = "#40a0ff", align = "center", stale_after_s = 900, thresholds = [
@@ -231,7 +232,7 @@ duration_s = 20           # seconds on screen per turn
   # widget = { type = "value", key = "ha:weather.home", condition_icons = {}, font = "9x15" }
   [[scene.zone]]
   rect = { x = 0, y = 150, w = 172, h = 22 }
-  widget = { type = "sparkline", key = "prom:house_power_series", color = "#ffaa00", fill = true, points = 120 }
+  widget = { type = "sparkline", key = "prom:power_hist", color = "#ffaa00", fill = true, points = 120 }
 
 # Shown only while the condition holds; otherwise skipped (and left at once if
 # it turns false mid-display). A missing key or a type mismatch counts as false.
@@ -246,8 +247,8 @@ condition = "prom:house_power > 0"
   widget = { type = "text", text = "paneld", font = "10x20", font_scale = 2, color = "#00ff80" }
 
 # A still image (or animated GIF) scaled into a zone. `path` is relative to
-# this file and is loaded when the config loads; use `key = "media:..."`
-# instead to show an image a source put in the store (M3).
+# this file and is loaded when the config loads. (`key = "..."` reads an image
+# from the store instead, but no source writes images yet.)
 [[scene]]
 name = "image"
   [[scene.zone]]

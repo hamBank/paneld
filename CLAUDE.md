@@ -32,5 +32,5 @@ Cross-compile for the Pi: `cross build --release --target aarch64-unknown-linux-
 - Rust stable, edition 2021 or newer. `anyhow` in the binary, `thiserror` in library crates.
 - Async: `tokio`. HTTP: `axum`. MQTT: `rumqttc`. Graphics: `embedded-graphics`. Logging: `tracing`.
 - Every change keeps `fmt`, `clippy -D warnings` and tests green.
-- When adding config fields, update `config/example.toml`, the validation code and the config tests together.
+- When adding config fields, update `config/example.toml`, the validation code, the config tests and `docs/configuration.md` together. A change to the keys a source writes, the HTTP API, the MQTT topics or the CLI updates the matching `docs/` page in the same change; `tests/docs_examples.rs` checks that every TOML example in `docs/` still parses.
 - Golden image changes must be intentional. Look at them before committing.

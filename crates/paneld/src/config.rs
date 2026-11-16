@@ -1,7 +1,7 @@
 //! Config file schema (DESIGN.md §8) and validation.
 //!
-//! Only what the current milestone implements is accepted; unknown keys are
-//! rejected so typos don't silently do nothing.
+//! User reference: `docs/configuration.md`. Unknown keys are rejected so
+//! typos don't silently do nothing.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -384,8 +384,8 @@ pub struct AircraftConfig {
     pub url: String,
     /// The point to measure from.
     pub location: LatLon,
-    /// Decimals the location is rounded to before it is sent (and used for
-    /// distances): 2 is about 1 km. 0 to 6.
+    /// Decimals the location is rounded to before it is sent: 2 is about
+    /// 1 km. 0 to 6. Distances use the exact location.
     #[serde(default = "default_location_decimals")]
     pub location_decimals: u8,
     /// Search radius in nautical miles, 1 to 250.
@@ -397,7 +397,7 @@ pub struct AircraftConfig {
     /// Keep aircraft reporting `alt_baro = "ground"`.
     #[serde(default)]
     pub include_ground: bool,
-    /// Seconds between polls, at least 1.
+    /// Seconds between polls, 1 to 86400.
     #[serde(default = "default_aircraft_interval_s")]
     pub interval_s: f64,
     /// Look up routes on adsbdb for the aircraft in the list.
@@ -592,7 +592,8 @@ pub struct ColorlightOutput {
     /// the right value with `paneld test-pattern --pattern bars`.
     #[serde(default)]
     pub color_order: ColorOrder,
-    /// Card firmware major version, for when discovery fails (DESIGN.md §4.2).
+    /// Card firmware major version (DESIGN.md §4.2). When set it overrides
+    /// discovery, which only warns on a mismatch.
     #[serde(default)]
     pub firmware_major: Option<u8>,
     /// Pause between the last row packet and the display frame, in µs.
@@ -964,7 +965,8 @@ pub struct ImageConfig {
     /// decoded once, while the config is loaded.
     #[serde(default)]
     pub path: Option<PathBuf>,
-    /// Store key holding a `Value::Image` (filled by sources, e.g. `media:…`).
+    /// Store key holding a `Value::Image`. No source writes images yet
+    /// (DESIGN.md §6 item 6), so for now this shows nothing.
     #[serde(default)]
     pub key: Option<String>,
     #[serde(default)]
@@ -1377,12 +1379,15 @@ impl Config {
         })
     }
 
-    /// Every store key the scenes read: widget `key`s and the keys in scene
-    /// conditions. Sources use it to subscribe only to what is shown (e.g.
-    /// the Home Assistant source's entity IDs). Includes the keys of text
-    /// templates.
+    /// Every store key the config reads: widget `key`s, the keys in scene
+    /// conditions and text templates, and the `[auto_dim.lux]` sensor.
+    /// Sources use it to subscribe only to what is used (e.g. the Home
+    /// Assistant source's entity IDs).
     pub fn referenced_keys(&self) -> std::collections::BTreeSet<String> {
         let mut keys = std::collections::BTreeSet::new();
+        if let Some(lux) = self.auto_dim.as_ref().and_then(|a| a.lux.as_ref()) {
+            keys.insert(lux.key.clone());
+        }
         for s in &self.scenes {
             if let Some(c) = s
                 .condition
