@@ -37,7 +37,11 @@ Architecture, config schema and roadmap are in [`DESIGN.md`](DESIGN.md).
 
 Addressing of daisy-chained cards is inferred from the protocol references, not confirmed on hardware; see `crates/colorlight-proto/PROTOCOL.md`.
 
-Optional next: a video zone (M7). See `DESIGN.md` §14.
+**M7 (video) is done:**
+- a `video` widget playing a file or a camera stream (`url_env`), decoded by an `ffmpeg` subprocess off the render thread;
+- `ffmpeg` runs only while the scene is on screen.
+
+All milestones in `DESIGN.md` §14 are built. What is left is bring-up and tuning on the real hardware (`DESIGN.md` §15).
 
 ## Hardware
 
