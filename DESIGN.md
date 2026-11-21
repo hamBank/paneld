@@ -443,6 +443,51 @@ As built (`reload.rs`):
 - `run --scene X` keeps showing X; if X is gone the reload is rejected.
 - Image files are not watched (limitation); edit the config or send SIGHUP.
 
+### 7.4 Web control app (M8, scoped, not built)
+
+A small browser UI for the HTTP API (§7.1), served by paneld itself, for phones and laptops on the LAN. It stays **unauthenticated** for now, like the API without `token_env`: anyone who can reach `[http] bind` can use it. It is written so a token can be added later without restructuring.
+
+**Shape (decided for the scope):**
+- **Delivery:** one self-contained page, `crates/paneld/assets/web/index.html`: HTML, CSS and vanilla JS. There is no framework, no build step and no new crate. It is embedded with `include_str!`, so the binary stays a single file and the systemd sandbox needs no new paths.
+- **Routes:** `GET /` and `GET /app` serve the page, with `Cache-Control: no-cache` and a strict `Content-Security-Policy` (`default-src 'self'`, inline script and style via a per-build hash, `img-src 'self'`). They are outside the API auth layer, like `/preview`.
+- **Same origin as the API:** no CORS, and the page needs no knowledge of the bind address.
+- **Updates:** the page polls `GET /api/state` every 1 s while visible (`document.visibilityState`) and every 10 s when hidden. Server-sent events are a follow-up, not needed at one panel.
+- **Config:** `[http] app = true` (default). `false` removes the routes for people who only want the API. This goes through the usual config rules: example, validation, tests and `docs/configuration.md`.
+
+**v1 features** (each maps to an existing endpoint; no API changes except the two marked new):
+
+| Panel | Uses |
+|---|---|
+| Status: scene on screen, pinned or auto, power, brightness, dim, fps, notification queue | `GET /api/state` |
+| Live preview image, when a preview output is configured | `GET /preview.png` (refreshed at most 2/s) |
+| Power toggle and brightness slider (0–255; the slider sends on release, not on every move) | `POST /api/power`, `POST /api/brightness` |
+| Scene picker: pin a scene, or **Auto** | `POST /api/scene/{name}`, `DELETE /api/scene` |
+| Notify form: text, icon (select), colour, duration, priority, repeat; or a scene; plus **Clear all** | `POST`/`DELETE /api/notify` |
+| Push a value: key (prefilled `<data_prefix>:`), value, unit | `POST /api/data/{key}` |
+| *(new)* the icon names, `data_prefix`, canvas size, version and whether a preview exists | `GET /api/info` (read-only; avoids hard-coding lists in the page) |
+
+**Must-have before the UI ships: cross-site request protection.**
+- **The problem today:** the API deliberately ignores `Content-Type` so `curl -d` works. A web page the user visits on another site can therefore `fetch(..., {mode: "no-cors", body: '{"on":false}'})` to `http://paneld.local:8080/api/power` as a "simple" `text/plain` request, and it succeeds. A UI makes it more likely that a browser on the LAN can reach paneld, so this is fixed first.
+- **Origin check:** every non-`GET` `/api/*` request that carries an `Origin` header must have an origin whose host and port equal the request's `Host`. Otherwise it gets 403 `{"error": "cross-origin request refused"}`. Browsers always send `Origin` on cross-origin POST, PUT and DELETE; `curl`, scripts and Home Assistant's REST commands send none, so they are unaffected.
+- **DNS rebinding:** when bound to loopback, only `Host` values of `localhost`, `127.0.0.1` or `[::1]` are accepted, so a rebinding attack can't reach the API.
+
+**Later, not v1:**
+- **Token:** a login box when `token_env` is set. The page gets a 401, asks for the token once and keeps it in `sessionStorage`. All calls go through one `api()` helper, so adding the header is one line.
+- **Other:** server-sent events instead of polling; editing scenes or config in the browser; several panels in one page.
+
+**Testing:**
+- **Rust:** the routes serve the page with the CSP header, and the `[http] app = false` case returns 404.
+- **Origin check:** same-origin, cross-origin and no-`Origin` cases, each for POST and DELETE.
+- **`/api/info`:** its JSON shape.
+- **The page itself:** a Playwright smoke test against `paneld run` on a test config:
+  - it loads with no console errors;
+  - pinning a scene shows in `/api/state`;
+  - the notify form queues a notification.
+
+  The test stays in CI's test job: the browser is local and needs no network.
+
+**Size estimate:** one PR. The page is about 400 lines; the Rust is about 300 lines plus tests (routes, origin check, `/api/info`). The docs change is a new `docs/web-app.md` and a row in `docs/control.md`.
+
 ---
 
 ## 8. Configuration (TOML) example
@@ -649,6 +694,7 @@ CI (GitHub Actions: fmt, clippy, tests, an aarch64 check for the Pi, a macOS che
 6. **M5 Ops**: metrics, systemd unit, deploy docs, cross-compile.
 7. **M6 Scale**: multi-region/multi-card output map, rotation/flip.
 8. **M7 (optional)** Video zone.
+9. **M8 Web control app** (scoped in §7.4, not built): a small unauthenticated browser UI served by paneld for the HTTP API. It first needs cross-site request protection for the API.
 
 Each milestone ends with: tests green, `cargo clippy -- -D warnings` clean, README updated.
 
