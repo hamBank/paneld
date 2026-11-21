@@ -7,6 +7,7 @@
 | [Scenes and widgets](scenes.md) | Layout, zones, the `clock`, `text`, `value`, `sparkline`, `image` and `video` widgets, fonts, icons, templates, number formats, conditions, the playlist and notifications. |
 | [Outputs](outputs.md) | The preview, the Colorlight card, the output map (regions, rotation, flip), brightness and auto-dim. |
 | [Control interfaces](control.md) | The HTTP API (every endpoint), Home Assistant over MQTT (entities, topics, payloads), metrics, live reload, signals, the CLI and environment variables. |
+| [Web control app](web-app.md) | The browser page at `/app`: its panels, security notes, turning it off, limitations. |
 
 Elsewhere in the repo:
 
