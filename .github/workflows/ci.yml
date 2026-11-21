@@ -77,6 +77,23 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-targets --locked
 
+  # Drives the web control app in Chromium against a real paneld on loopback.
+  web-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p paneld --locked
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: tests/web
+      - run: npx playwright install --with-deps chromium
+        working-directory: tests/web
+      - run: node tests/web/smoke.mjs
+
   msrv:
     runs-on: ubuntu-latest
     steps:

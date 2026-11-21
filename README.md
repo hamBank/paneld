@@ -43,6 +43,10 @@ Addressing of daisy-chained cards is inferred from the protocol references, not 
 
 **After M7:** a `system` source (uptime, CPU temperature, load, memory) and a `media` folder source for `image` widgets, both planned in `DESIGN.md` §6 but left out of the milestones.
 
+**M8 (web control app) is done:**
+- a small browser page at `/app`, served by paneld, with a live preview, status, power and brightness, scene pinning, notifications and value pushes (`docs/web-app.md`);
+- unauthenticated like the API without `token_env`, with cross-site request and DNS rebinding protection.
+
 All milestones in `DESIGN.md` §14 are built. What is left is bring-up and tuning on the real hardware (`DESIGN.md` §15).
 
 ## Hardware

@@ -1,0 +1,12 @@
+{
+  "name": "paneld-web-smoke",
+  "private": true,
+  "type": "module",
+  "description": "Browser smoke test for the paneld web control app",
+  "scripts": {
+    "test": "node smoke.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.63.0"
+  }
+}
