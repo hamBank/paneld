@@ -437,7 +437,8 @@ As built (`reload.rs`):
   - **What the sink thread does with them:** it wakes on the channel and swaps in the brightness plan (gamma, brightness, white point, mode), colour order, sync gap and output map before the next frame.
   - **Firmware:** discovery runs once per sink, and its result is kept, so a changed `firmware_major` is resolved again without re-discovering.
   - **Preview:** `scale` and `grid` sit behind a `watch` (`PreviewControl`).
-  - **Why the topology stays restart-only:** sink threads, their `/metrics` series and the HA card sensor are wired up at start-up. An output whose new settings cannot be built (an output-map error that validation missed) keeps its old ones and counts a reload error. A difference logs a warning naming it, and scene and playlist changes still apply. A changed canvas width/height is different: the whole reload is rejected, because scenes laid out for the new size would not fit the running canvas.
+  - **Why the topology stays restart-only:** sink threads, their `/metrics` series and the HA card sensor are wired up at start-up. An output whose new settings cannot be built (an output-map error that validation missed) keeps its old ones and counts a reload error.
+- **Restart-only changes** log a warning naming them, and scene and playlist changes still apply. A changed canvas width/height is different: the whole reload is rejected, because scenes laid out for the new size would not fit the running canvas.
 - **`[sources]` is applied live**, per source (§6). It is no longer restart-only.
 - `run --scene X` keeps showing X; if X is gone the reload is rejected.
 - Image files are not watched (limitation); edit the config or send SIGHUP.
