@@ -160,6 +160,8 @@ bind = "127.0.0.1:8080"
 # token_env = "PANELD_API_TOKEN"
 # Keys pushed with POST /api/data/<prefix>:<name> (must differ from every source prefix).
 # data_prefix = "push"
+# Serve the web control app at / and /app (no auth, like /preview). false = API only.
+# app = true
 
 # Quiet hours: dim level 0-255 inside a daily local-time window (may wrap
 # midnight). Auto-dim = the minimum of everything configured. All need a restart.

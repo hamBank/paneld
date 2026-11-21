@@ -269,6 +269,11 @@ pub fn lookup(name: &str) -> Option<&'static Icon> {
     ICONS.iter().find(|i| i.name == name)
 }
 
+/// Every built-in icon name, in definition order.
+pub fn names() -> Vec<&'static str> {
+    ICONS.iter().map(|i| i.name).collect()
+}
+
 /// Comma-separated list of known icon names, for error messages.
 pub fn known_names() -> String {
     ICONS.iter().map(|i| i.name).collect::<Vec<_>>().join(", ")

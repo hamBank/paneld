@@ -132,8 +132,8 @@ pub struct RestartOnly {
     pub canvas: (u32, u32),
     pub fps: u32,
     pub http_bind: SocketAddr,
-    /// `[http] token_env` and `data_prefix` (the API router is built once).
-    http_api: (Option<String>, String),
+    /// `[http] token_env`, `data_prefix` and `app` (the API router is built once).
+    http_api: (Option<String>, String, bool),
     /// Kind and interface of each `[[output]]` ([`crate::live_outputs::topology`]).
     /// The sinks are started once; their settings follow reloads
     /// (`live_outputs.rs`), but adding, removing or re-pointing one does not.
@@ -152,7 +152,11 @@ impl RestartOnly {
             canvas: (cfg.canvas.width, cfg.canvas.height),
             fps: cfg.canvas.fps,
             http_bind: cfg.http.bind,
-            http_api: (cfg.http.token_env.clone(), cfg.http.data_prefix.clone()),
+            http_api: (
+                cfg.http.token_env.clone(),
+                cfg.http.data_prefix.clone(),
+                cfg.http.app,
+            ),
             outputs: crate::live_outputs::topology(cfg),
             autodim: format!("{:?}{:?}", cfg.quiet_hours, cfg.auto_dim),
             mqtt: format!("{:?}", cfg.mqtt),
@@ -169,7 +173,7 @@ impl RestartOnly {
             v.push("http.bind");
         }
         if self.http_api != new.http_api {
-            v.push("http.token_env/data_prefix");
+            v.push("http.token_env/data_prefix/app");
         }
         if self.outputs != new.outputs {
             v.push("[[output]] (adding, removing or changing the interface of an output)");
@@ -507,6 +511,10 @@ mod tests {
         assert_eq!(p.warnings.len(), 1);
         assert!(p.warnings[0].contains("canvas.fps"));
         assert!(p.warnings[0].contains("restart"));
+
+        let new = cfg_text(16, 8, 30, &["a"]) + "[http]\napp = false\n";
+        let p = c.prepare(new.as_bytes()).unwrap();
+        assert!(p.warnings[0].contains("http.token_env/data_prefix/app"));
 
         let new = cfg_text(16, 8, 30, &["a"])
             + "[http]\nbind = \"127.0.0.1:9999\"\n[[output]]\ntype = \"preview\"\n";

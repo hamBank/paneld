@@ -1,0 +1,27 @@
+# Config for the web app smoke test (tests/web/smoke.mjs). Loopback only.
+
+[canvas]
+width = 64
+height = 32
+fps = 10
+
+[[output]]
+type = "preview"
+
+[http]
+bind = "127.0.0.1:18090"
+
+[playlist]
+default_duration_s = 30
+
+[[scene]]
+name = "a"
+  [[scene.zone]]
+  rect = { x = 0, y = 0, w = 64, h = 32 }
+  widget = { type = "clock", format = "%H:%M", font = "9x15", color = "#ffaa00" }
+
+[[scene]]
+name = "b"
+  [[scene.zone]]
+  rect = { x = 0, y = 0, w = 64, h = 32 }
+  widget = { type = "text", text = "scene b {push:smoke}", font = "6x10", color = "#80c0ff" }

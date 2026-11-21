@@ -43,13 +43,30 @@ pub struct ApiSettings {
     pub token: Option<Secret>,
     /// Pushed keys must start with `<data_prefix>:`.
     pub data_prefix: String,
+    /// Start-up facts `GET /api/info` reports.
+    pub info: ApiInfo,
+}
+
+/// Restart-only facts for `GET /api/info`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApiInfo {
+    /// Canvas `(width, height)` in pixels.
+    pub canvas: (u32, u32),
+    /// Whether a preview output is configured.
+    pub preview: bool,
+    /// `[http] app`.
+    pub app: bool,
 }
 
 impl ApiSettings {
     /// Read the token named by `token_env` (an error naming the variable if
     /// it is unset or empty) and warn when the API is open on a
     /// non-loopback address.
-    pub fn from_config(http: &HttpConfig) -> Result<ApiSettings, String> {
+    pub fn from_config(
+        http: &HttpConfig,
+        canvas: (u32, u32),
+        preview: bool,
+    ) -> Result<ApiSettings, String> {
         let token = http
             .token_env
             .as_deref()
@@ -65,6 +82,11 @@ impl ApiSettings {
         Ok(ApiSettings {
             token,
             data_prefix: http.data_prefix.clone(),
+            info: ApiInfo {
+                canvas,
+                preview,
+                app: http.app,
+            },
         })
     }
 }
@@ -85,6 +107,7 @@ pub fn router(control: Control, store: &crate::store::Store, settings: ApiSettin
         settings,
     });
     Router::new()
+        .route("/api/info", get(info))
         .route("/api/state", get(state))
         .route("/api/notify", post(notify).delete(clear_notifications))
         .route("/api/data/{key}", post(push_data))
@@ -94,6 +117,8 @@ pub fn router(control: Control, store: &crate::store::Store, settings: ApiSettin
         .route("/api/power", post(set_power))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .route_layer(middleware::from_fn_with_state(api.clone(), authenticate))
+        // Outermost, so a cross-site request is refused (403) before auth (401).
+        .route_layer(middleware::from_fn(refuse_cross_origin))
         .with_state(api)
 }
 
@@ -143,6 +168,94 @@ fn parse_body<T: DeserializeOwned>(
 }
 
 // ---------------------------------------------------------------------------
+// Cross-site request protection
+
+/// Split `host[:port]` (a bracketed IPv6 literal keeps its brackets). The
+/// host is lower-cased. `None` for an empty host, a bad port, userinfo or
+/// anything that is not a plain authority.
+pub(crate) fn split_authority(authority: &str) -> Option<(String, Option<u16>)> {
+    if authority.is_empty()
+        || authority.contains(|c: char| c.is_whitespace() || matches!(c, '/' | '?' | '#' | '@'))
+    {
+        return None;
+    }
+    let (host, port) = if authority.starts_with('[') {
+        let end = authority.find(']')?;
+        let rest = &authority[end + 1..];
+        let port = match rest {
+            "" => None,
+            r => Some(r.strip_prefix(':')?),
+        };
+        (&authority[..=end], port)
+    } else {
+        match authority.split_once(':') {
+            Some((h, p)) => (h, Some(p)),
+            None => (authority, None),
+        }
+    };
+    if host.is_empty() || (host.contains(':') && !host.starts_with('[')) {
+        return None;
+    }
+    let port = match port {
+        None => None,
+        Some(p) if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => {
+            Some(p.parse::<u16>().ok()?)
+        }
+        Some(_) => return None,
+    };
+    Some((host.to_ascii_lowercase(), port))
+}
+
+/// Whether an `Origin` header value names the same host and port as the
+/// request's `Host`. Default ports (80 for http, 443 for https) are filled
+/// in on both sides, using the origin's scheme. `null`, other schemes and
+/// anything unparseable never match.
+pub fn origin_matches_host(origin: &str, host: &str) -> bool {
+    let (default_port, rest) = if let Some(r) = origin.strip_prefix("http://") {
+        (80, r)
+    } else if let Some(r) = origin.strip_prefix("https://") {
+        (443, r)
+    } else {
+        return false;
+    };
+    let (Some((oh, op)), Some((hh, hp))) = (split_authority(rest), split_authority(host)) else {
+        return false;
+    };
+    oh == hh && op.unwrap_or(default_port) == hp.unwrap_or(default_port)
+}
+
+/// The request's authority: the `Host` header, or the URI's (HTTP/2).
+pub(crate) fn request_host(req: &Request) -> Option<String> {
+    match req.headers().get(header::HOST) {
+        Some(v) => v.to_str().ok().map(str::to_owned),
+        None => req.uri().authority().map(|a| a.to_string()),
+    }
+}
+
+/// Refuse state-changing requests that a page on another site sent. The API
+/// ignores `Content-Type`, so a plain `fetch` with `no-cors` would otherwise
+/// reach it. Browsers always send `Origin` on such requests; `curl`, scripts
+/// and Home Assistant send none and pass.
+async fn refuse_cross_origin(req: Request, next: Next) -> Response {
+    use axum::http::Method;
+    if matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS) {
+        return next.run(req).await;
+    }
+    if let Some(origin) = req.headers().get(header::ORIGIN) {
+        let same = origin
+            .to_str()
+            .ok()
+            .zip(request_host(&req))
+            .is_some_and(|(o, h)| origin_matches_host(o, &h));
+        if !same {
+            return ApiError(StatusCode::FORBIDDEN, "cross-origin request refused".into())
+                .into_response();
+        }
+    }
+    next.run(req).await
+}
+
+// ---------------------------------------------------------------------------
 // Auth
 
 /// Compare two byte strings without stopping at the first difference. The
@@ -189,6 +302,19 @@ async fn authenticate(State(api): State<Shared>, req: Request, next: Next) -> Re
 
 // ---------------------------------------------------------------------------
 // Routes
+
+/// `GET /api/info`: start-up facts the web app needs.
+async fn info(State(api): State<Shared>) -> Json<Json_> {
+    let i = api.settings.info;
+    Json(json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "canvas": { "width": i.canvas.0, "height": i.canvas.1 },
+        "icons": crate::icons::names(),
+        "data_prefix": api.settings.data_prefix,
+        "preview": i.preview,
+        "app": i.app,
+    }))
+}
 
 /// `GET /api/state`: the render loop's latest [`Status`].
 async fn state(State(api): State<Shared>) -> Json<Status> {
@@ -380,6 +506,12 @@ mod tests {
     use std::future::IntoFuture;
     use std::sync::mpsc::TryRecvError;
 
+    const TEST_INFO: ApiInfo = ApiInfo {
+        canvas: (172, 172),
+        preview: true,
+        app: true,
+    };
+
     struct Harness {
         addr: std::net::SocketAddr,
         link: ControlLink,
@@ -393,6 +525,7 @@ mod tests {
         let settings = ApiSettings {
             token: token.map(Secret::for_test),
             data_prefix: "push".into(),
+            info: TEST_INFO,
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -831,6 +964,7 @@ mod tests {
         let s = ApiSettings {
             token: Some(Secret::for_test("s3cret-token")),
             data_prefix: "push".into(),
+            info: TEST_INFO,
         };
         let shown = format!("{s:?} {:#?}", s.clone());
         assert!(!shown.contains("s3cret"), "{shown}");
@@ -840,10 +974,13 @@ mod tests {
     #[test]
     fn startup_reads_the_token_or_names_the_variable() {
         let mut http = HttpConfig::default();
-        assert!(ApiSettings::from_config(&http).unwrap().token.is_none());
+        assert!(ApiSettings::from_config(&http, (8, 8), false)
+            .unwrap()
+            .token
+            .is_none());
 
         http.token_env = Some("PANELD_TEST_API_TOKEN_UNSET".into());
-        let e = ApiSettings::from_config(&http).unwrap_err();
+        let e = ApiSettings::from_config(&http, (8, 8), false).unwrap_err();
         assert!(
             e.contains("PANELD_TEST_API_TOKEN_UNSET") && e.contains("not set"),
             "{e}"
@@ -851,7 +988,7 @@ mod tests {
 
         std::env::set_var("PANELD_TEST_API_TOKEN_EMPTY", "  ");
         http.token_env = Some("PANELD_TEST_API_TOKEN_EMPTY".into());
-        let e = ApiSettings::from_config(&http).unwrap_err();
+        let e = ApiSettings::from_config(&http, (8, 8), false).unwrap_err();
         assert!(
             e.contains("PANELD_TEST_API_TOKEN_EMPTY") && e.contains("empty"),
             "{e}"
@@ -859,8 +996,194 @@ mod tests {
 
         std::env::set_var("PANELD_TEST_API_TOKEN_SET", "s3cret-token\n");
         http.token_env = Some("PANELD_TEST_API_TOKEN_SET".into());
-        let s = ApiSettings::from_config(&http).unwrap();
+        let s = ApiSettings::from_config(&http, (8, 8), false).unwrap();
         assert_eq!(s.token.as_ref().unwrap().expose(), "s3cret-token");
         assert!(!format!("{s:?}").contains("s3cret"));
+    }
+
+    #[tokio::test]
+    async fn info_reports_startup_facts() {
+        let h = harness(None).await;
+        let (s, j) = h.send(reqwest::Method::GET, "/api/info", None).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(j["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(j["canvas"], json!({ "width": 172, "height": 172 }));
+        assert_eq!(j["data_prefix"], "push");
+        assert_eq!(j["preview"], true);
+        assert_eq!(j["app"], true);
+        let icons = j["icons"].as_array().unwrap();
+        assert_eq!(icons.len(), crate::icons::ICONS.len());
+        assert_eq!(icons[0], crate::icons::ICONS[0].name);
+        assert!(icons.iter().any(|i| i == "thermometer"));
+        let mut keys: Vec<_> = j.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                "app",
+                "canvas",
+                "data_prefix",
+                "icons",
+                "preview",
+                "version"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn info_needs_the_token() {
+        let h = harness(Some("s3cret-token")).await;
+        let (s, _) = h.send(reqwest::Method::GET, "/api/info", None).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+    }
+
+    /// Send with an optional `Origin`; the request's `Host` is `addr`.
+    async fn with_origin(
+        h: &Harness,
+        method: reqwest::Method,
+        path: &str,
+        origin: Option<&str>,
+        auth: Option<&str>,
+    ) -> (StatusCode, Json_) {
+        let mut r = h
+            .client
+            .request(method, h.url(path))
+            .body(r#"{"on": true}"#);
+        if let Some(o) = origin {
+            r = r.header("Origin", o);
+        }
+        if let Some(a) = auth {
+            r = r.header("Authorization", a);
+        }
+        let resp = r.send().await.unwrap();
+        let status = StatusCode::from_u16(resp.status().as_u16()).unwrap();
+        (status, resp.json().await.unwrap_or(Json_::Null))
+    }
+
+    #[tokio::test]
+    async fn cross_origin_writes_are_refused() {
+        let h = harness(None).await;
+        let own = format!("http://{}", h.addr);
+        for (method, path) in [
+            (reqwest::Method::POST, "/api/power"),
+            (reqwest::Method::DELETE, "/api/notify"),
+        ] {
+            // Same origin and no Origin pass through to normal handling.
+            for origin in [Some(own.as_str()), None] {
+                let (s, _) = with_origin(&h, method.clone(), path, origin, None).await;
+                assert_eq!(s, StatusCode::ACCEPTED, "{method} {path} {origin:?}");
+            }
+            for origin in [
+                "http://evil.example",
+                "https://evil.example",
+                "null",
+                "garbage",
+                "http://",
+                "ftp://127.0.0.1",
+                &format!("http://127.0.0.1:{}", h.addr.port() + 1),
+                &format!("{own}/"),
+            ] {
+                let (s, j) = with_origin(&h, method.clone(), path, Some(origin), None).await;
+                assert_eq!(s, StatusCode::FORBIDDEN, "{method} {path} {origin}");
+                assert_eq!(j, json!({ "error": "cross-origin request refused" }));
+            }
+        }
+        // Refused requests never reach the handler: only the four that passed did.
+        assert_eq!(h.cmd().unwrap(), Command::SetPower(true));
+        assert_eq!(h.cmd().unwrap(), Command::SetPower(true));
+        assert_eq!(h.cmd().unwrap(), Command::ClearNotifications);
+        assert_eq!(h.cmd().unwrap(), Command::ClearNotifications);
+        assert!(matches!(h.cmd(), Err(TryRecvError::Empty)));
+
+        // Reads are never checked.
+        let (s, _) = with_origin(
+            &h,
+            reqwest::Method::GET,
+            "/api/state",
+            Some("http://evil.example"),
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn cross_origin_is_403_before_auth_is_401() {
+        let h = harness(Some("s3cret-token")).await;
+        let (s, j) = with_origin(
+            &h,
+            reqwest::Method::POST,
+            "/api/power",
+            Some("http://evil.example"),
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+        assert_eq!(error_of(&j), "cross-origin request refused");
+        // Even with a valid token a foreign origin is refused...
+        let (s, _) = with_origin(
+            &h,
+            reqwest::Method::POST,
+            "/api/power",
+            Some("http://evil.example"),
+            Some("Bearer s3cret-token"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+        // ...and a same-origin one still needs it.
+        let own = format!("http://{}", h.addr);
+        let (s, _) = with_origin(&h, reqwest::Method::POST, "/api/power", Some(&own), None).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+        let (s, _) = with_origin(
+            &h,
+            reqwest::Method::POST,
+            "/api/power",
+            Some(&own),
+            Some("Bearer s3cret-token"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::ACCEPTED);
+        assert_eq!(h.cmd().unwrap(), Command::SetPower(true));
+        assert!(matches!(h.cmd(), Err(TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn origin_and_host_comparison() {
+        for (origin, host) in [
+            ("http://a", "a"),
+            ("http://a:80", "a"),
+            ("http://a", "a:80"),
+            ("https://a", "a:443"),
+            ("https://a:443", "a"),
+            ("http://a:8080", "a:8080"),
+            ("http://A.Example:8080", "a.example:8080"),
+            ("http://[::1]:8080", "[::1]:8080"),
+            ("http://[::1]", "[::1]:80"),
+            ("http://127.0.0.1:8080", "127.0.0.1:8080"),
+        ] {
+            assert!(origin_matches_host(origin, host), "{origin} vs {host}");
+        }
+        for (origin, host) in [
+            ("http://a", "b"),
+            ("http://a:8080", "a"),
+            ("http://a", "a:8080"),
+            ("https://a", "a:80"),
+            ("http://a:81", "a:80"),
+            ("null", "a"),
+            ("", "a"),
+            ("http://", ""),
+            ("a", "a"),
+            ("http://a/", "a"),
+            ("http://a/path", "a"),
+            ("http://u@a", "a"),
+            ("http://a:x", "a:x"),
+            ("http://a:99999", "a:99999"),
+            ("http://a:", "a:"),
+            ("http://[::1", "[::1"),
+            ("http://::1", "::1"),
+            ("http://a", ""),
+        ] {
+            assert!(!origin_matches_host(origin, host), "{origin} vs {host}");
+        }
     }
 }
