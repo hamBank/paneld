@@ -54,7 +54,7 @@ The card is driven over raw Ethernet on a dedicated network interface. This need
 
 **Stopping.** When paneld stops, it stops sending, and the card keeps showing the last frame it received. Send black first if that matters: `POST /api/power {"on": false}`, wait a frame, then stop.
 
-**Tuning.**
+**Tuning.** Every setting here except `interface` applies live when you save the config, so you can adjust gamma, colour order or the regions while looking at the panel (see [live reload](control.md#live-reload)).
 - **`color_order`:** `paneld test-pattern --pattern bars --interface eth1` draws eight bars, left to right: white, yellow, cyan, green, magenta, red, blue, black. If they come out in other colours, try another `--color-order` until they match, then set that in the config.
 - **`gamma`:** 2.2 suits most panels.
 - **`white_point`:** use it if white looks blue or yellow.

@@ -3,9 +3,11 @@
 
 # Edits to this file are picked up live by `paneld run` (polled every second,
 # applied once the content is stable; `kill -HUP` reloads at once). Scenes,
-# zones, widgets, the playlist and [sources] reload; canvas.fps, [http],
-# [mqtt], [quiet_hours], [auto_dim] and [[output]] need a restart, and a canvas
-# size change is rejected. A config with errors is logged and ignored; the old
+# zones, widgets, the playlist, [sources] and output settings (gamma,
+# brightness, colour order, regions, preview scale...) reload; canvas.fps,
+# [http], [mqtt], [quiet_hours], [auto_dim] and adding, removing or
+# re-pointing an [[output]] need a restart, and a canvas size change is
+# rejected. A config with errors is logged and ignored; the old
 # one keeps running.
 
 [canvas]

@@ -269,6 +269,14 @@ impl FrameSender {
         self.double_sync = v;
     }
 
+    /// Apply reloaded settings (everything but the brightness result, which
+    /// the caller sets with [`FrameSender::set_applied`]).
+    pub fn set_output(&mut self, color_order: ColorOrder, sync_gap: Duration, map: Arc<OutputMap>) {
+        self.color_order = color_order;
+        self.sync_gap = sync_gap;
+        self.map = Some(map);
+    }
+
     /// Send one frame. Returns how long it took, pause included.
     pub fn send<L: Link + ?Sized>(
         &mut self,
@@ -363,9 +371,29 @@ impl RateLimit {
     }
 }
 
+/// Sends reloaded settings to a running sink (see [`SinkHandle::update`]).
+#[derive(Debug, Clone)]
+pub struct SinkUpdater(Arc<watch::Sender<Arc<SinkSettings>>>);
+
+impl SinkUpdater {
+    pub fn update(&self, settings: SinkSettings) {
+        self.0.send_replace(Arc::new(settings));
+    }
+
+    /// An updater with no sink behind it, and the receiver a sink would use.
+    #[cfg(test)]
+    pub(crate) fn detached(
+        settings: SinkSettings,
+    ) -> (SinkUpdater, watch::Receiver<Arc<SinkSettings>>) {
+        let (tx, rx) = watch::channel(Arc::new(settings));
+        (SinkUpdater(Arc::new(tx)), rx)
+    }
+}
+
 /// Handle to a running sink. Call [`SinkHandle::stop`] to end it.
 pub struct SinkHandle {
     stop: watch::Sender<bool>,
+    settings: SinkUpdater,
     thread: Option<JoinHandle<()>>,
     pub stats: Arc<SinkStats>,
     /// Network interface this sink sends on (the `sink` metric label).
@@ -373,6 +401,19 @@ pub struct SinkHandle {
 }
 
 impl SinkHandle {
+    /// Apply reloaded settings from the next frame on: brightness plan
+    /// (gamma, brightness, white point, mode), colour order, sync gap,
+    /// firmware override and output map. The interface cannot change; a
+    /// different one is ignored (the caller restarts instead).
+    pub fn update(&self, settings: SinkSettings) {
+        self.settings.update(settings);
+    }
+
+    /// A handle that only updates settings, for the reload task.
+    pub fn updater(&self) -> SinkUpdater {
+        self.settings.clone()
+    }
+
     /// Ask the thread to stop and wait for it.
     pub fn stop(mut self) {
         self.stop.send_replace(true);
@@ -408,14 +449,16 @@ where
     let (stop_tx, stop_rx) = watch::channel(false);
     let stats = Arc::new(SinkStats::default());
     let interface = settings.interface.clone();
+    let (settings_tx, settings_rx) = watch::channel(Arc::new(settings));
     let thread = std::thread::Builder::new()
         .name("colorlight".into())
         .spawn({
             let stats = stats.clone();
-            move || run(settings, rx, levels, stop_rx, open, &stats)
+            move || run(settings_rx, rx, levels, stop_rx, open, &stats)
         })?;
     Ok(SinkHandle {
         stop: stop_tx,
+        settings: SinkUpdater(Arc::new(settings_tx)),
         thread: Some(thread),
         stats,
         interface,
@@ -423,7 +466,7 @@ where
 }
 
 fn run<L, F>(
-    settings: SinkSettings,
+    mut settings_rx: watch::Receiver<Arc<SinkSettings>>,
     mut rx: FrameReceiver,
     mut levels: watch::Receiver<OutputLevel>,
     mut stop: watch::Receiver<bool>,
@@ -454,7 +497,13 @@ fn run<L, F>(
         })
     };
 
-    let iface = settings.interface.as_str();
+    let mut settings = settings_rx.borrow_and_update().clone();
+    let iface_owned = settings.interface.clone();
+    let iface = iface_owned.as_str();
+    let mut settings_open = true;
+    // What discovery found, kept so a reloaded `firmware_major` can be
+    // resolved again without re-discovering.
+    let mut discovered: Option<Option<u8>> = None;
     let mut current = *levels.borrow_and_update();
     let first = settings.plan.apply(current);
     let mut sender = FrameSender::new(
@@ -496,8 +545,9 @@ fn run<L, F>(
 
         if !configured {
             match startup_discovery(&mut link, &settings) {
-                Ok(double) => {
-                    sender.set_double_sync(double);
+                Ok(found) => {
+                    sender.set_double_sync(resolve_double_sync(&settings, found));
+                    discovered = Some(found);
                     configured = true;
                 }
                 Err(e) => {
@@ -521,11 +571,22 @@ fn run<L, F>(
                         levels_open = r.is_ok();
                         true
                     }
+                    // Reloaded settings re-send the current canvas too.
+                    r = settings_rx.changed(), if settings_open => {
+                        settings_open = r.is_ok();
+                        true
+                    }
                     _ = stop.wait_for(|s| *s) => false,
                 }
             });
             if !got {
                 return;
+            }
+            let latest = settings_rx.borrow_and_update().clone();
+            if !Arc::ptr_eq(&latest, &settings) {
+                let new = latest;
+                apply_reload(&mut sender, &settings, &new, current, discovered);
+                settings = new;
             }
             // Read the level once per frame; rebuild the LUT only on change.
             let level = *levels.borrow_and_update();
@@ -572,24 +633,46 @@ fn run<L, F>(
     }
 }
 
-/// Discover cards and decide whether to send syncs twice. Warnings only; an
-/// error means the link itself failed.
-fn startup_discovery<L: Link>(link: &mut L, s: &SinkSettings) -> Result<bool, LinkError> {
-    let cards = discover(link, DISCOVERY_TIMEOUT)?;
-    for c in &cards {
-        tracing::info!(
-            receiver = c.receiver_index,
-            firmware = format!("{}.{}", c.firmware_major, c.firmware_minor),
-            reported_size = format!("{}x{}", c.width, c.height),
-            "colorlight: found receiver"
+/// Switch a running sender to reloaded settings. The interface is fixed for
+/// the life of the sink: a different one is logged and ignored.
+fn apply_reload(
+    sender: &mut FrameSender,
+    old: &SinkSettings,
+    new: &SinkSettings,
+    level: OutputLevel,
+    discovered: Option<Option<u8>>,
+) {
+    if new.interface != old.interface {
+        tracing::warn!(
+            interface = old.interface,
+            new_interface = new.interface,
+            "colorlight: the interface of a running output cannot change; restart paneld"
         );
     }
-    // Compare against the output's card space (output map), not the canvas.
-    for w in colorlight_net::check_layout(s.card_size, &cards) {
-        tracing::warn!("colorlight: {w}");
+    sender.set_output(new.color_order, new.sync_gap, new.map.clone());
+    sender.set_applied(new.plan.apply(level));
+    if new.firmware_major != old.firmware_major {
+        if let Some(found) = discovered {
+            sender.set_double_sync(resolve_double_sync(new, found));
+        }
     }
-    let highest = cards.iter().map(|c| c.firmware_major).max();
-    let major = match (s.firmware_major, highest) {
+    if new.card_size != old.card_size {
+        tracing::info!(
+            interface = old.interface,
+            card_size = format!("{}x{}", new.card_size.0, new.card_size.1),
+            "colorlight: new card space (the discovery size check runs at start-up only)"
+        );
+    }
+    tracing::info!(
+        interface = old.interface,
+        "colorlight: output settings reloaded"
+    );
+}
+
+/// Whether to send syncs twice, from the configured override and what
+/// discovery found (the highest firmware major, `None` if nothing answered).
+fn resolve_double_sync(s: &SinkSettings, found: Option<u8>) -> bool {
+    let major = match (s.firmware_major, found) {
         (Some(m), found) => {
             if found.is_some_and(|f| f != m) {
                 tracing::warn!(
@@ -616,7 +699,27 @@ fn startup_discovery<L: Link>(link: &mut L, s: &SinkSettings) -> Result<bool, Li
         double_sync = double,
         "colorlight: ready"
     );
-    Ok(double)
+    double
+}
+
+/// Discover cards and log what they report. Returns the highest firmware
+/// major found (`None` if nothing answered). Warnings only; an error means
+/// the link itself failed.
+fn startup_discovery<L: Link>(link: &mut L, s: &SinkSettings) -> Result<Option<u8>, LinkError> {
+    let cards = discover(link, DISCOVERY_TIMEOUT)?;
+    for c in &cards {
+        tracing::info!(
+            receiver = c.receiver_index,
+            firmware = format!("{}.{}", c.firmware_major, c.firmware_minor),
+            reported_size = format!("{}x{}", c.width, c.height),
+            "colorlight: found receiver"
+        );
+    }
+    // Compare against the output's card space (output map), not the canvas.
+    for w in colorlight_net::check_layout(s.card_size, &cards) {
+        tracing::warn!("colorlight: {w}");
+    }
+    Ok(cards.iter().map(|c| c.firmware_major).max())
 }
 
 #[cfg(test)]
@@ -1080,6 +1183,81 @@ mod tests {
         // The next frame is complete again.
         s.send(&mut link, &canvas(4, 2)).unwrap();
         assert_eq!(kinds(&link), expected_order(2, 2));
+    }
+
+    #[test]
+    fn thread_applies_reloaded_settings_from_the_next_frame() {
+        use colorlight_net::mock::Event;
+        let (tx, rx) = crate::engine::frame_channel(4, 2);
+        let link = Shared(Arc::new(Mutex::new(MockLink::new())));
+        let open = {
+            let link = link.clone();
+            move |_: &str| Ok(link.clone())
+        };
+        let settings = |gap_us: u64, firmware: u8, order: ColorOrder| SinkSettings {
+            interface: "eth9".into(),
+            plan: BrightnessPlan {
+                mode: BrightnessMode::Hardware,
+                configured: 255,
+                gamma: 1.0,
+                white_point: crate::color::Color::WHITE,
+            },
+            color_order: order,
+            sync_gap: Duration::from_micros(gap_us),
+            firmware_major: Some(firmware),
+            card_size: (4, 2),
+            map: Arc::new(OutputMap::identity(4, 2)),
+            reconnect_backoff: (Duration::from_millis(5), Duration::from_millis(20)),
+        };
+        let (_level_tx, level_rx) = watch::channel(OutputLevel::FULL);
+        let handle = spawn_with(settings(0, 13, ColorOrder::Rgb), rx, level_rx, open).unwrap();
+        let mut red = canvas(4, 2);
+        for y in 0..2 {
+            for x in 0..4 {
+                red.set_pixel(x, y, Rgb888::new(255, 0, 0));
+            }
+        }
+        let wait_for = |done: &dyn Fn(&MockLink) -> bool| {
+            let start = Instant::now();
+            while !done(&link.0.lock().unwrap()) {
+                assert!(start.elapsed() < Duration::from_secs(10), "timed out");
+                tx.send_replace(Arc::new(red.clone()));
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        wait_for(&|l| l.frames().iter().any(|f| f[12] == 0x01));
+        // Firmware 13: doubled syncs; RGB order: red in the first byte.
+        assert!(link.types().windows(2).any(|w| w == [0x0A, 0x0A]));
+
+        handle.update(settings(7_000, 11, ColorOrder::Bgr));
+        link.0.lock().unwrap().events.clear();
+        let gap = Event::Pause(Duration::from_micros(7_000));
+        wait_for(&|l| l.events.contains(&gap) && l.frames().iter().any(|f| f[12] == 0x01));
+        let l = link.0.lock().unwrap();
+        // The first complete frame after the reload: single sync, new gap,
+        // blue-green-red byte order (red is now the third byte).
+        let start = l
+            .events
+            .iter()
+            .position(|e| matches!(e, Event::Frame(f) if f[12] == 0x0A))
+            .unwrap();
+        let after: Vec<&Event> = l.events[start..].iter().collect();
+        let Event::Frame(second) = after[1] else {
+            panic!("frame expected")
+        };
+        assert_eq!(second[12], 0x55, "one brightness packet, then rows");
+        assert!(after.contains(&&gap));
+        let row = after
+            .iter()
+            .find_map(|e| match e {
+                Event::Frame(f) if f[12] == 0x55 => Some(f),
+                _ => None,
+            })
+            .unwrap();
+        let px = &row[row.len() - 12..row.len() - 9];
+        assert_eq!(px, [0, 0, 255]);
+        drop(l);
+        handle.stop();
     }
 
     #[test]

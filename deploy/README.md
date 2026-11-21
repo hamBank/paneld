@@ -199,10 +199,10 @@ systemctl status paneld
 journalctl -u paneld -f                    # follow the log
 journalctl -u paneld -b --since "10 min ago"
 sudo systemctl reload paneld               # SIGHUP: re-read config.toml now
-sudo systemctl restart paneld              # needed for canvas.fps, [http], [mqtt], [[output]] changes
+sudo systemctl restart paneld              # needed for canvas.fps, [http], [mqtt], adding/removing outputs
 ```
 
-Config changes are picked up by themselves within about 2 seconds; `reload` just makes it immediate (a rejected config is logged and the old one keeps running). `canvas.fps`, `[http]`, `[mqtt]`, `[[output]]` settings and the environment file need a **restart** (`systemctl restart`), because systemd only reads `EnvironmentFile=` at start.
+Config changes are picked up by themselves within about 2 seconds; `reload` just makes it immediate (a rejected config is logged and the old one keeps running). Output settings (gamma, brightness, colour order, regions) apply live, which helps during bring-up. `canvas.fps`, `[http]`, `[mqtt]`, adding, removing or re-pointing an `[[output]]`, and the environment file need a **restart** (`systemctl restart`), because systemd only reads `EnvironmentFile=` at start.
 
 Log level: add `Environment=RUST_LOG=info,paneld=debug` through `sudo systemctl edit paneld` (a drop-in; keeps the shipped unit untouched), then restart.
 

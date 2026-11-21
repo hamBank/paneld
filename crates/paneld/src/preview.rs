@@ -3,6 +3,8 @@
 //! Routes: `GET /preview.png` (current frame, scaled) and `GET /preview`
 //! (a page that keeps reloading the PNG). Frames are shown without any
 //! post-processing, i.e. the "true" colours the scene asked for.
+//!
+//! `scale` and `grid` follow config reloads through [`PreviewControl`].
 
 use axum::extract::State;
 use axum::http::{header, StatusCode};
@@ -10,44 +12,64 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 
+use tokio::sync::watch;
+
 use crate::config::PreviewOutput;
 use crate::engine::FrameReceiver;
 
 #[derive(Clone)]
 struct PreviewState {
     frames: FrameReceiver,
-    scale: u32,
-    grid: bool,
+    /// `(scale, grid)`, updated on reload.
+    look: watch::Receiver<(u32, bool)>,
     refresh_ms: u32,
     /// HTML credits shown under the image (data providers' terms).
     footer: String,
 }
 
-/// Routes for the preview sink. `fps` sets the page's refresh rate (capped
-/// at 10 Hz, polling PNGs faster than that is pointless).
+/// Changes the preview's `scale` and `grid` while it runs (config reload).
+#[derive(Debug, Clone)]
+pub struct PreviewControl(watch::Sender<(u32, bool)>);
+
+impl PreviewControl {
+    /// Apply a reloaded `[[output]] type = "preview"`. True if it changed.
+    pub fn update(&self, cfg: &PreviewOutput) -> bool {
+        self.0.send_if_modified(|look| {
+            let new = (cfg.scale, cfg.grid);
+            let changed = *look != new;
+            *look = new;
+            changed
+        })
+    }
+}
+
+/// Routes for the preview sink, and the handle that changes its look. `fps`
+/// sets the page's refresh rate (capped at 10 Hz, polling PNGs faster than
+/// that is pointless).
 pub fn router(
     frames: FrameReceiver,
     cfg: &PreviewOutput,
     fps: u32,
     attributions: &[&str],
-) -> Router {
+) -> (Router, PreviewControl) {
+    let (tx, look) = watch::channel((cfg.scale, cfg.grid));
     let state = PreviewState {
         frames,
-        scale: cfg.scale,
-        grid: cfg.grid,
+        look,
         refresh_ms: 1000 / fps.clamp(1, 10),
         footer: attributions.join(" · "),
     };
-    Router::new()
+    let router = Router::new()
         .route("/preview.png", get(png))
         .route("/preview", get(page))
-        .with_state(state)
+        .with_state(state);
+    (router, PreviewControl(tx))
 }
 
 async fn png(State(s): State<PreviewState>) -> Response {
     let frame = s.frames.borrow().clone();
-    match tokio::task::spawn_blocking(move || crate::png_io::encode(&frame, s.scale, s.grid)).await
-    {
+    let (scale, grid) = *s.look.borrow();
+    match tokio::task::spawn_blocking(move || crate::png_io::encode(&frame, scale, grid)).await {
         Ok(bytes) => (
             [
                 (header::CONTENT_TYPE, "image/png"),

@@ -18,6 +18,7 @@ pub mod fonts;
 pub mod format;
 pub mod icons;
 pub mod inline;
+pub mod live_outputs;
 pub mod logging;
 pub mod media;
 pub mod metrics;
