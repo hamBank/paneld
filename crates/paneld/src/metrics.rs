@@ -1171,6 +1171,11 @@ mod tests {
         let settings = ApiSettings {
             token: token.map(Secret::for_test),
             data_prefix: "push".into(),
+            info: api::ApiInfo {
+                canvas: (8, 8),
+                preview: false,
+                app: true,
+            },
         };
         let app =
             api::router(r.control.clone(), &r.store, settings).merge(router(r.registry.clone()));

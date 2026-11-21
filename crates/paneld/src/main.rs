@@ -514,8 +514,12 @@ fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
     let (cfg, loaded_text) = Config::load_with_text(&config_path)?;
     paneld::sources::check_environment(&cfg)?;
     cfg.check_video_environment()?;
-    let api_settings =
-        paneld::api::ApiSettings::from_config(&cfg.http).map_err(anyhow::Error::msg)?;
+    let api_settings = paneld::api::ApiSettings::from_config(
+        &cfg.http,
+        (cfg.canvas.width, cfg.canvas.height),
+        cfg.preview().is_some(),
+    )
+    .map_err(anyhow::Error::msg)?;
     paneld::mqtt_ha::check_environment(&cfg)?;
     let (tx, rx) = frame_channel(cfg.canvas.width, cfg.canvas.height);
     let (reload_tx, reload_rx) = std::sync::mpsc::channel();
@@ -549,6 +553,9 @@ fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
         .collect::<anyhow::Result<_>>()?;
 
     let mut app = Router::new().merge(paneld::api::router(control.clone(), &store, api_settings));
+    if cfg.http.app {
+        app = app.merge(paneld::web::app_router());
+    }
     let mut preview_control = None;
     if let Some(p) = cfg.preview() {
         let (routes, ctl) =
@@ -584,6 +591,8 @@ fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
             store.clone(),
         );
         let app = app.merge(paneld::metrics::router(metrics));
+        // Last, so it wraps every route (DNS-rebinding guard on loopback binds).
+        let app = paneld::web::guard_host(app, cfg.http.bind);
         // Quiet hours / auto-dim (changes need a restart).
         tokio::spawn(paneld::autodim::run(
             paneld::autodim::AutoDim::new(cfg.quiet_hours.clone(), cfg.auto_dim.clone()),

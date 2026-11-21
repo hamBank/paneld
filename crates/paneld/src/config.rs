@@ -812,6 +812,10 @@ pub struct HttpConfig {
     /// `<data_prefix>:<name>`. It must not be used by any source.
     #[serde(default = "default_data_prefix")]
     pub data_prefix: String,
+    /// Serve the web control app at `/` and `/app`. `false` leaves only the
+    /// API, preview and metrics.
+    #[serde(default = "default_app")]
+    pub app: bool,
 }
 
 impl Default for HttpConfig {
@@ -820,8 +824,13 @@ impl Default for HttpConfig {
             bind: default_bind(),
             token_env: None,
             data_prefix: default_data_prefix(),
+            app: default_app(),
         }
     }
+}
+
+fn default_app() -> bool {
+    true
 }
 
 fn default_data_prefix() -> String {

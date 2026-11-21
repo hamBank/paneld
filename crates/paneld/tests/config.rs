@@ -1019,6 +1019,19 @@ fn http_api_settings() {
 }
 
 #[test]
+fn http_app_switch() {
+    assert!(Config::parse(MINIMAL).unwrap().http.app);
+    let cfg = Config::parse(&format!("{MINIMAL}[http]\napp = false\n")).unwrap();
+    assert!(!cfg.http.app);
+    let cfg = Config::parse(&format!("{MINIMAL}[http]\napp = true\n")).unwrap();
+    assert!(cfg.http.app);
+    let e = err(&format!("{MINIMAL}[http]\napp = \"no\"\n"));
+    assert!(e.contains("app"), "{e}");
+    let e = err(&format!("{MINIMAL}[http]\napps = false\n"));
+    assert!(e.contains("unknown field"), "{e}");
+}
+
+#[test]
 fn data_prefix_must_not_collide_with_sources() {
     let ha = "[sources.home]\ntype = \"home_assistant\"\nurl = \"ws://x\"\ntoken_env = \"T\"\n";
     for (extra, prefix) in [
