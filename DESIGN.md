@@ -443,13 +443,17 @@ As built (`reload.rs`):
 - `run --scene X` keeps showing X; if X is gone the reload is rejected.
 - Image files are not watched (limitation); edit the config or send SIGHUP.
 
-### 7.4 Web control app (M8, scoped, not built)
+### 7.4 Web control app (M8)
 
 A small browser UI for the HTTP API (§7.1), served by paneld itself, for phones and laptops on the LAN. It stays **unauthenticated** for now, like the API without `token_env`: anyone who can reach `[http] bind` can use it. It is written so a token can be added later without restructuring.
 
 **Shape (decided for the scope):**
-- **Delivery:** one self-contained page, `crates/paneld/assets/web/index.html`: HTML, CSS and vanilla JS. There is no framework, no build step and no new crate. It is embedded with `include_str!`, so the binary stays a single file and the systemd sandbox needs no new paths.
-- **Routes:** `GET /` and `GET /app` serve the page, with `Cache-Control: no-cache` and a strict `Content-Security-Policy` (`default-src 'self'`, inline script and style via a per-build hash, `img-src 'self'`). They are outside the API auth layer, like `/preview`.
+- **Delivery:** three files in `crates/paneld/assets/web/`: `index.html`, `app.css` and `app.js` (vanilla JS). There is no framework, no build step and no new crate. CSS and JS are separate files rather than inline, so the CSP needs no hashes. It is embedded with `include_str!`, so the binary stays a single file and the systemd sandbox needs no new paths.
+- **Routes:** `GET /` and `GET /app` serve `index.html`; `GET /app/app.css` and `GET /app/app.js` serve the rest. They are outside the API auth layer, like `/preview`.
+- **Headers on every app response:**
+  - `Cache-Control: no-cache`
+  - `X-Content-Type-Options: nosniff`
+  - `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`
 - **Same origin as the API:** no CORS, and the page needs no knowledge of the bind address.
 - **Updates:** the page polls `GET /api/state` every 1 s while visible (`document.visibilityState`) and every 10 s when hidden. Server-sent events are a follow-up, not needed at one panel.
 - **Config:** `[http] app = true` (default). `false` removes the routes for people who only want the API. This goes through the usual config rules: example, validation, tests and `docs/configuration.md`.
@@ -694,7 +698,7 @@ CI (GitHub Actions: fmt, clippy, tests, an aarch64 check for the Pi, a macOS che
 6. **M5 Ops**: metrics, systemd unit, deploy docs, cross-compile.
 7. **M6 Scale**: multi-region/multi-card output map, rotation/flip.
 8. **M7 (optional)** Video zone.
-9. **M8 Web control app** (scoped in §7.4, not built): a small unauthenticated browser UI served by paneld for the HTTP API. It first needs cross-site request protection for the API.
+9. **M8 Web control app** (§7.4): a small unauthenticated browser UI served by paneld for the HTTP API. It first needs cross-site request protection for the API.
 
 Each milestone ends with: tests green, `cargo clippy -- -D warnings` clean, README updated.
 
