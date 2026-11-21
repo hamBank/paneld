@@ -37,7 +37,9 @@ Related pages:
 | `[[scene]]`, `[playlist]`, `[[font]]`, `[notifications]` | applied live |
 | `[sources.*]` | applied live, per source: only sources whose config changed are restarted |
 | `canvas.width`, `canvas.height` | a change rejects the whole reload; restart to resize |
-| `canvas.fps`, `[http]`, `[mqtt]`, `[quiet_hours]`, `[auto_dim]`, every `[[output]]` | need a restart; a difference logs a warning, and the rest of the reload still applies |
+| `[[output]]` settings: preview `scale` and `grid`; Colorlight `gamma`, `brightness`, `white_point`, `brightness_mode`, `color_order`, `firmware_major`, `sync_gap_us`, `card_size` and `[[output.region]]` | applied live, from the next frame. A Colorlight output is matched to the running one by `interface`. |
+| adding or removing an `[[output]]`, or changing an output's `interface` | needs a restart; a warning is logged, and the settings of the outputs that still match are applied |
+| `canvas.fps`, `[http]`, `[mqtt]`, `[quiet_hours]`, `[auto_dim]` | need a restart; a difference logs a warning, and the rest of the reload still applies |
 
 ## `[canvas]` (required)
 

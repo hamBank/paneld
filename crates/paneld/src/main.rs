@@ -549,14 +549,19 @@ fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
         .collect::<anyhow::Result<_>>()?;
 
     let mut app = Router::new().merge(paneld::api::router(control.clone(), &store, api_settings));
+    let mut preview_control = None;
     if let Some(p) = cfg.preview() {
-        app = app.merge(preview::router(
-            rx,
-            p,
-            cfg.canvas.fps,
-            &paneld::sources::attributions(&cfg),
-        ));
+        let (routes, ctl) =
+            preview::router(rx, p, cfg.canvas.fps, &paneld::sources::attributions(&cfg));
+        app = app.merge(routes);
+        preview_control = Some(ctl);
     }
+    // Output settings follow reloads (live_outputs.rs).
+    let output_reload = std::sync::Arc::new(paneld::live_outputs::OutputReload::new(
+        &cfg,
+        sinks.iter().map(|s| (s.interface.clone(), s.updater())),
+        preview_control,
+    ));
 
     let rt = tokio::runtime::Runtime::new()?;
     let served = rt.block_on(async {
@@ -589,10 +594,13 @@ fn run(config_path: PathBuf, scene: Option<String>) -> anyhow::Result<()> {
             reload_ctx,
             reload_tx,
             reload_stats.clone(),
-            Some(reload::SourceReload {
-                supervisor: sources.clone(),
-                store: store.clone(),
-            }),
+            reload::Followers {
+                sources: Some(reload::SourceReload {
+                    supervisor: sources.clone(),
+                    store: store.clone(),
+                }),
+                outputs: Some(output_reload),
+            },
         );
         // Home Assistant entities over MQTT (§7.2); off without `[mqtt]`.
         let (ha_stop, ha_rx) = tokio::sync::watch::channel(false);

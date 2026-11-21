@@ -431,7 +431,13 @@ Watch the config file. On change: parse + validate fully, build the new scenes a
 As built (`reload.rs`):
 - **Polling instead of the `notify` crate.** Once a second the file is read and its content hashed. This works the same for in-place writes, rename-and-replace, network filesystems and macOS, is independent of mtime granularity, and adds no dependency. The cost is up to ~2 s latency. SIGHUP (unix) reloads immediately.
 - **Debounce:** a change is parsed once the same new content has been seen on two consecutive polls. Identical content (a touch) never reloads. Content that failed is not retried until it changes or SIGHUP arrives.
-- **Restart-only:** `canvas.fps`, `[http]`, `[mqtt]`, `[quiet_hours]`, `[auto_dim]` and all `[[output]]` settings (including Colorlight gamma, brightness, colour order; applying them live would need a settings channel into each sink, deferred). A difference logs a warning naming it, and scene and playlist changes still apply. A changed canvas width/height is different: the whole reload is rejected, because scenes laid out for the new size would not fit the running canvas.
+- **Restart-only:** `canvas.fps`, `[http]`, `[mqtt]`, `[quiet_hours]`, `[auto_dim]`, and the output *topology* (adding or removing an `[[output]]`, or changing an output's `interface`; `live_outputs::topology`).
+- **Output settings are applied live** (`live_outputs.rs`, added after M7):
+  - **Colorlight:** each sink has a settings `watch` channel (`SinkHandle::update` / `SinkUpdater`). After an accepted reload, `OutputReload::apply` matches outputs by interface, compares each table's `Debug` text with what that sink last got, and sends new `SinkSettings` only on a difference.
+  - **What the sink thread does with them:** it wakes on the channel and swaps in the brightness plan (gamma, brightness, white point, mode), colour order, sync gap and output map before the next frame.
+  - **Firmware:** discovery runs once per sink, and its result is kept, so a changed `firmware_major` is resolved again without re-discovering.
+  - **Preview:** `scale` and `grid` sit behind a `watch` (`PreviewControl`).
+  - **Why the topology stays restart-only:** sink threads, their `/metrics` series and the HA card sensor are wired up at start-up. An output whose new settings cannot be built (an output-map error that validation missed) keeps its old ones and counts a reload error. A difference logs a warning naming it, and scene and playlist changes still apply. A changed canvas width/height is different: the whole reload is rejected, because scenes laid out for the new size would not fit the running canvas.
 - **`[sources]` is applied live**, per source (§6). It is no longer restart-only.
 - `run --scene X` keeps showing X; if X is gone the reload is rejected.
 - Image files are not watched (limitation); edit the config or send SIGHUP.

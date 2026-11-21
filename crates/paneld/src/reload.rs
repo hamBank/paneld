@@ -134,9 +134,9 @@ pub struct RestartOnly {
     pub http_bind: SocketAddr,
     /// `[http] token_env` and `data_prefix` (the API router is built once).
     http_api: (Option<String>, String),
-    /// `Debug` rendering of the `[[output]]` list. Outputs (preview and
-    /// Colorlight sinks, including gamma, brightness and colour order) are
-    /// set up once at start-up.
+    /// Kind and interface of each `[[output]]` ([`crate::live_outputs::topology`]).
+    /// The sinks are started once; their settings follow reloads
+    /// (`live_outputs.rs`), but adding, removing or re-pointing one does not.
     outputs: String,
     /// `Debug` rendering of `[quiet_hours]` and `[auto_dim]` (the auto-dim
     /// task is started once).
@@ -153,7 +153,7 @@ impl RestartOnly {
             fps: cfg.canvas.fps,
             http_bind: cfg.http.bind,
             http_api: (cfg.http.token_env.clone(), cfg.http.data_prefix.clone()),
-            outputs: format!("{:?}", cfg.outputs),
+            outputs: crate::live_outputs::topology(cfg),
             autodim: format!("{:?}{:?}", cfg.quiet_hours, cfg.auto_dim),
             mqtt: format!("{:?}", cfg.mqtt),
         }
@@ -172,7 +172,7 @@ impl RestartOnly {
             v.push("http.token_env/data_prefix");
         }
         if self.outputs != new.outputs {
-            v.push("[[output]]");
+            v.push("[[output]] (adding, removing or changing the interface of an output)");
         }
         if self.autodim != new.autodim {
             v.push("[quiet_hours]/[auto_dim]");
@@ -283,6 +283,14 @@ pub struct SourceReload {
     pub store: Store,
 }
 
+/// What else follows an accepted reload, after the scenes: the source
+/// supervisor and the running outputs. Either may be absent (tests).
+#[derive(Clone, Default)]
+pub struct Followers {
+    pub sources: Option<SourceReload>,
+    pub outputs: Option<Arc<crate::live_outputs::OutputReload>>,
+}
+
 /// The watcher task. Polls every `interval` and on every `force` wake-up
 /// (SIGHUP). File reads and config parsing run on the blocking pool.
 /// Returns when the render loop's receiver is gone.
@@ -293,8 +301,9 @@ pub async fn watch(
     stats: Arc<ReloadStats>,
     interval: Duration,
     force: Arc<Notify>,
-    sources: Option<SourceReload>,
+    follow: Followers,
 ) {
+    let Followers { sources, outputs } = follow;
     let ctx = Arc::new(ctx);
     let watcher = Arc::new(Mutex::new(watcher));
     let mut tick = tokio::time::interval(interval);
@@ -324,6 +333,16 @@ pub async fn watch(
                     return;
                 }
                 stats.reloads.fetch_add(1, Ordering::Relaxed);
+                if let Some(o) = &outputs {
+                    let (changed, errors) = o.apply(&config);
+                    for c in &changed {
+                        tracing::info!("applied live: {c} settings");
+                    }
+                    for e in &errors {
+                        stats.reload_errors.fetch_add(1, Ordering::Relaxed);
+                        tracing::error!("output settings not applied, keeping the old ones: {e}");
+                    }
+                }
                 if let Some(s) = &sources {
                     // Scenes are already applied; sources follow. A source
                     // that cannot be changed counts as a reload error and
@@ -348,12 +367,7 @@ pub async fn watch(
 }
 
 /// Start watching on the current tokio runtime, including SIGHUP on unix.
-pub fn spawn(
-    ctx: ReloadCtx,
-    tx: Sender<SceneSet>,
-    stats: Arc<ReloadStats>,
-    sources: Option<SourceReload>,
-) {
+pub fn spawn(ctx: ReloadCtx, tx: Sender<SceneSet>, stats: Arc<ReloadStats>, follow: Followers) {
     let force = Arc::new(Notify::new());
     #[cfg(unix)]
     {
@@ -373,15 +387,7 @@ pub fn spawn(
         Some(bytes) => ConfigWatcher::with_baseline(&ctx.path, Some(bytes)),
         None => ConfigWatcher::new(&ctx.path),
     };
-    tokio::spawn(watch(
-        ctx,
-        watcher,
-        tx,
-        stats,
-        POLL_INTERVAL,
-        force,
-        sources,
-    ));
+    tokio::spawn(watch(ctx, watcher, tx, stats, POLL_INTERVAL, force, follow));
 }
 
 #[cfg(test)]
@@ -467,6 +473,28 @@ mod tests {
         let e = err(c.prepare(cfg_text(32, 8, 30, &["a"]).as_bytes()));
         assert!(e.contains("canvas size changed from 16x8 to 32x8"), "{e}");
         assert!(e.contains("restart"), "{e}");
+    }
+
+    #[test]
+    fn output_settings_reload_live_but_new_outputs_need_a_restart() {
+        let base = cfg_text(16, 8, 30, &["a"]);
+        let with = |extra: &str| format!("{base}[[output]]\ntype = \"preview\"\n{extra}");
+        let c = ctx(
+            &with("scale = 4\n[[output]]\ntype = \"colorlight\"\ninterface = \"eth1\"\n"),
+            None,
+        );
+
+        // Settings of the same outputs: applied live, no warning.
+        let p = c
+            .prepare(with("scale = 8\ngrid = true\n[[output]]\ntype = \"colorlight\"\ninterface = \"eth1\"\ngamma = 1.8\ncolor_order = \"bgr\"\n").as_bytes())
+            .unwrap();
+        assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+
+        // Another interface: restart-only.
+        let p = c
+            .prepare(with("[[output]]\ntype = \"colorlight\"\ninterface = \"eth2\"\n").as_bytes())
+            .unwrap();
+        assert!(p.warnings[0].contains("[[output]]"), "{:?}", p.warnings);
     }
 
     #[test]
@@ -610,7 +638,7 @@ mod tests {
                 stats.clone(),
                 Duration::from_millis(5),
                 force.clone(),
-                None,
+                Followers::default(),
             ));
             // Broken file: counted, nothing delivered.
             std::fs::write(&f, "not = [valid").unwrap();
@@ -683,10 +711,13 @@ mod tests {
                 stats.clone(),
                 Duration::from_millis(5),
                 Arc::new(Notify::new()),
-                Some(SourceReload {
-                    supervisor: sup.clone(),
-                    store: store.clone(),
-                }),
+                Followers {
+                    sources: Some(SourceReload {
+                        supervisor: sup.clone(),
+                        store: store.clone(),
+                    }),
+                    outputs: None,
+                },
             ));
             // A source needing an unset variable: scenes still reload, the
             // old source keeps running, and an error is counted.

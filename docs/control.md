@@ -292,8 +292,13 @@ Useful alerts:
 - **Applied live:**
   - scenes, zones, widgets, conditions, fonts, `[notifications]` and `[playlist]`;
   - `[sources]`, per source. Only sources whose effective config changed are restarted, and that includes a Home Assistant source whose scenes now read different entities. A removed source's keys are cleared. A source that needs an unset environment variable isn't started, the old one keeps running and the reload counts an error.
+  - Output settings: the preview's `scale` and `grid`, and every setting of a Colorlight output except its `interface`. That includes gamma, brightness, colour order, white point, the regions and the card size. Each Colorlight output is matched to the running sink by `interface`, and the sink switches at the next frame. The log says `applied live: colorlight output eth1 settings`.
   - The notification queue and the pin are kept.
-- **Needs a restart:** `canvas.fps`, `[http]`, `[mqtt]`, `[quiet_hours]`, `[auto_dim]` and every `[[output]]`. A difference logs a warning naming it, and the rest of the reload applies.
+- **Needs a restart:**
+  - `canvas.fps`, `[http]`, `[mqtt]`, `[quiet_hours]` and `[auto_dim]`;
+  - adding or removing an `[[output]]`, or changing an output's `interface`.
+
+  A difference logs a warning naming it, and the rest of the reload applies.
 - **Rejected:** a changed canvas width or height.
 
 **Errors never take the panel down.** Any of these is logged and counted in `paneld_config_reload_errors_total`, and the old config keeps running:
