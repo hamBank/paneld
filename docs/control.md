@@ -212,6 +212,8 @@ A small page for phones and laptops, served by paneld itself at `/` (and `/app`)
 - Every response carries a strict `Content-Security-Policy` (own origin only, no inline code), `X-Content-Type-Options: nosniff` and `Cache-Control: no-cache`.
 - The page calls the API on its own origin, so the [cross-site check](#conventions) lets it through and keeps other sites out.
 
+What each panel does, and the limitations, are in [Web control app](web-app.md).
+
 ---
 
 ## Home Assistant over MQTT
