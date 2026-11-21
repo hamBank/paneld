@@ -492,6 +492,12 @@ A small browser UI for the HTTP API (§7.1), served by paneld itself, for phones
 
 **Size estimate:** one PR. The page is about 400 lines; the Rust is about 300 lines plus tests (routes, origin check, `/api/info`). The docs change is a new `docs/web-app.md` and a row in `docs/control.md`.
 
+**As built (backend):**
+- **Origin check:** it applies to every method except `GET`, `HEAD` and `OPTIONS`, and sits outermost on the `/api/*` routes, so a cross-site request gets 403 before auth can answer 401. Origin and `Host` are compared as lower-cased host plus port; a missing port means 80 for `http://` and 443 for `https://`, taken from the origin's scheme for both sides. `null`, other schemes, paths, userinfo and unparseable values are refused. A request without `Origin` passes.
+- **Host guard:** one layer around the whole merged router in `main.rs` (`web::guard_host`), added only when `bind` is a loopback address. It covers the API, the app, the preview and `/metrics`. A missing `Host` passes; HTTP/2 uses the URI authority. The 403 body is JSON on every route.
+- **`GET /api/info`:** computed once at start from the config (`ApiSettings.info`), behind the bearer auth. `[http] app` is part of the restart-only warning.
+- **Docs:** the app has a short section in `docs/control.md` instead of a separate `docs/web-app.md`.
+
 ---
 
 ## 8. Configuration (TOML) example

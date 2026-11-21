@@ -2,6 +2,7 @@
 
 How to drive, watch and operate a running paneld. Contents:
 - the HTTP control API;
+- the web control app;
 - Home Assistant over MQTT;
 - the metrics endpoint;
 - live reload and signals;
@@ -12,6 +13,7 @@ All the HTTP endpoints share one server on `[http] bind` (default `127.0.0.1:808
 
 | Path | Purpose | Auth |
 |---|---|---|
+| `/`, `/app` | [web control app](#web-control-app) (a page, a stylesheet and a script) | never |
 | `/api/*` | control API | bearer token when `[http] token_env` is set |
 | `/preview`, `/preview.png` | [preview](outputs.md#preview) | never |
 | `/metrics` | Prometheus metrics | never |
@@ -34,12 +36,42 @@ HTTP and MQTT can be mixed freely. Brightness and power always start at 255 and 
 - **Commands** answer `202 {"status": "accepted"}` once they are queued for the render loop. If the render loop has died, they answer 503.
 - **Errors** are always `{"error": "<message>"}`, with 400 (bad input), 401, 404, 409, 413 or 503.
 - **Authentication.** With `[http] token_env = "PANELD_API_TOKEN"`, every `/api/*` request needs `Authorization: Bearer <token>`, compared in constant time. Without it the request gets 401 with `WWW-Authenticate: Bearer`. Without `token_env` the API is open; a warning is logged if it is open on a non-loopback address.
+- **Cross-site requests.** A `POST`, `PUT` or `DELETE` to `/api/*` that carries an `Origin` header is refused with `403 {"error": "cross-origin request refused"}` unless the origin's host and port equal the request's `Host` (`http://a:80` matches `Host: a`; `Origin: null` never matches). This check comes before authentication, so a cross-site request gets 403, not 401. Requests without `Origin` (`curl`, scripts, Home Assistant) are unaffected, and so are `GET`s.
+- **Host check on loopback.** When `[http] bind` is a loopback address, every route (API, app, preview, metrics) answers `403 {"error": "host not allowed"}` unless the `Host` header's hostname is `localhost`, `127.0.0.1` or `[::1]` (any port). This stops DNS-rebinding pages. Reaching paneld through another name, such as a reverse proxy, needs a non-loopback `bind` or a proxy that rewrites `Host`. No check applies when bound to another address.
 
 The examples below use:
 
 ```bash
 H=http://localhost:8080
 A="Authorization: Bearer $PANELD_API_TOKEN"   # drop -H "$A" when there is no token
+```
+
+### `GET /api/info`
+
+Facts that only change on restart. The [web app](#web-control-app) reads them instead of hard-coding them. `200`:
+
+```json
+{
+  "version": "0.1.0",
+  "canvas": { "width": 172, "height": 172 },
+  "icons": ["thermometer", "droplet", "bolt"],
+  "data_prefix": "push",
+  "preview": true,
+  "app": true
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `version` | The paneld version. |
+| `canvas` | Canvas size in pixels. |
+| `icons` | Every [built-in icon](scenes.md#icons) name, for `POST /api/notify`. |
+| `data_prefix` | `[http] data_prefix`: pushed keys must start with `<data_prefix>:`. |
+| `preview` | Whether a preview output is configured, so `/preview.png` exists. |
+| `app` | `[http] app`. |
+
+```bash
+curl -H "$A" $H/api/info
 ```
 
 ### `GET /api/state`
@@ -168,6 +200,17 @@ curl -H "$A" -d '{"value": 128}' $H/api/brightness
 ```bash
 curl -H "$A" -d '{"on": false}' $H/api/power
 ```
+
+---
+
+## Web control app
+
+A small page for phones and laptops, served by paneld itself at `/` (and `/app`). It uses the HTTP API above: status, preview, power and brightness, scene picker, notifications and pushed values. It is embedded in the binary; there is nothing to install.
+
+- It is **not authenticated**: anyone who can reach `[http] bind` can use it, just like the API without `token_env`. Keep `bind` on loopback, or on a network you trust.
+- Turn it off with `[http] app = false` (the routes then answer 404).
+- Every response carries a strict `Content-Security-Policy` (own origin only, no inline code), `X-Content-Type-Options: nosniff` and `Cache-Control: no-cache`.
+- The page calls the API on its own origin, so the [cross-site check](#conventions) lets it through and keeps other sites out.
 
 ---
 

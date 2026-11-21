@@ -94,13 +94,16 @@ Regions may overlap on the canvas (show one area twice) but not in card space. T
 
 ## `[http]`
 
-The HTTP server for the control API, the preview and `/metrics`. Restart-only.
+The HTTP server for the control API, the web app, the preview and `/metrics`. Restart-only.
+
+When `bind` is a loopback address, every route also requires a `Host` header of `localhost`, `127.0.0.1` or `[::1]` (see [Conventions](control.md#conventions)).
 
 | Key | Type | Default | Valid | Meaning |
 |---|---|---|---|---|
 | `bind` | `"ip:port"` | `"127.0.0.1:8080"` | a socket address | Listen address. `0.0.0.0:8080` for the whole network. |
 | `token_env` | string | none (API open) | env var name | Name of the variable holding the bearer token every `/api/*` request must send. A warning is logged if the API is open on a non-loopback address. |
 | `data_prefix` | string | `"push"` | letters, digits, `_`, `-`; not used by any source | Key namespace for `POST /api/data/{key}`: pushed keys must be `<data_prefix>:<name>`. |
+| `app` | bool | `true` | | Serve the [web control app](control.md#web-control-app) at `/` and `/app`. `false` leaves only the API, preview and metrics. The app itself needs no token; it is as open as the API is without `token_env`. |
 
 ## `[mqtt]`
 
